@@ -395,6 +395,9 @@ Swarm sections above to copy them out.
   `relation "accio_dataset_metadata" does not exist`. This is a harmless
   readiness check while the loader is still working. Rebuild the coordinator
   image to use the quiet readiness probe and periodic progress messages.
+- `Extension ... v0.0.1 ... does not match ... v0.0.0` means the coordinator
+  image predates the pinned Python-version fix. Rebuild it. The image build now
+  loads the scanner once as a smoke test and fails immediately on a mismatch.
 - A source repeatedly fails with `Missing ...tbl`: verify the bind path on that
   source node and confirm all tables assigned to it exist there.
 - The coordinator reports metadata or table mismatch: the PostgreSQL volume was
