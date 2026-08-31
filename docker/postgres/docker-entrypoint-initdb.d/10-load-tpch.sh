@@ -107,6 +107,11 @@ psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
     --set "table_list=$tables" \
     --set "scale=${TPCH_SCALE:-unknown}" \
     --set "stats_target=${DB_STATS_TARGET:-100}" <<'SQL'
+SELECT setseed(1.0 / 42.0);
+SET default_statistics_target = :stats_target;
+ANALYZE;
+
+BEGIN;
 CREATE TABLE accio_dataset_metadata (
     placement TEXT NOT NULL,
     source_id TEXT NOT NULL,
@@ -117,9 +122,7 @@ CREATE TABLE accio_dataset_metadata (
 INSERT INTO accio_dataset_metadata (placement, source_id, table_list, scale)
 VALUES (:'placement', :'source_id', :'table_list', :'scale');
 ALTER TABLE accio_dataset_metadata SET (autovacuum_enabled = off);
-SELECT setseed(1.0 / 42.0);
-SET default_statistics_target = :stats_target;
-ANALYZE;
+COMMIT;
 SQL
 
 log "TPC-H initialization complete: $tables"

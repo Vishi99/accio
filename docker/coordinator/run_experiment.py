@@ -145,6 +145,7 @@ def wait_for_source(
     started = time.monotonic()
     deadline = started + timeout
     next_progress_report = started + 30
+    metadata_empty_since: float | None = None
     last_error = "not attempted"
     print(
         f"[accio-coordinator] waiting for {source} to load "
@@ -199,8 +200,21 @@ def wait_for_source(
             continue
 
         if metadata is None:
-            last_error = "accio_dataset_metadata is empty"
             now = time.monotonic()
+            if metadata_table is not None:
+                if metadata_empty_since is None:
+                    metadata_empty_since = now
+                elif now - metadata_empty_since >= 15:
+                    raise SystemExit(
+                        f"[accio-coordinator] {source} has an empty "
+                        "accio_dataset_metadata table; PostgreSQL initialization "
+                        "was interrupted or failed. Inspect the source logs, then "
+                        "reset its data volume"
+                    )
+                last_error = "accio_dataset_metadata exists but is empty"
+            else:
+                metadata_empty_since = None
+                last_error = "accio_dataset_metadata has not been created yet"
             if now >= next_progress_report:
                 print(
                     f"[accio-coordinator] still waiting for {source} "
