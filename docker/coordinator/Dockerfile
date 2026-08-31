@@ -16,6 +16,7 @@ RUN apt-get update \
         cmake \
         git \
         libpq-dev \
+        libssl-dev \
         maven \
         ninja-build \
         openjdk-17-jdk-headless \
@@ -26,8 +27,11 @@ RUN git clone --depth 1 \
         --branch "$POSTGRESSCANNER_REF" \
         --recurse-submodules \
         --shallow-submodules \
-        "$POSTGRESSCANNER_REPOSITORY" /opt/postgresscanner \
-    && make -C /opt/postgresscanner
+        "$POSTGRESSCANNER_REPOSITORY" /opt/postgresscanner
+
+# The fork hard-codes OpenSSL 1.1 paths. Bookworm provides OpenSSL 3, so let
+# CMake discover the system headers and libraries installed by libssl-dev.
+RUN make -C /opt/postgresscanner OPENSSL_FLAG=
 
 WORKDIR /opt/accio
 COPY . /opt/accio
