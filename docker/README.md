@@ -20,6 +20,7 @@ and runs the selected `tpch2_v*` workload.
 | `docker/experiment.env.example` | All experiment, TPC-H, resource, and cost settings |
 | `docker/coordinator/Dockerfile` | Accio, DuckDB, custom PostgreSQL scanner, and rewriter image |
 | `docker/postgres/Dockerfile` | PostgreSQL image with TPC-H loader and optional `netem` support |
+| `generate_tpch_data.sh` | Clone, build, and run TPC-H dbgen |
 | `run_multinode_experiments.sh` | Build/deploy/log/status/rerun wrapper |
 | `run_docker_experiments.sh` | Existing imperative single-host runner |
 
@@ -53,22 +54,39 @@ on the deployment network under the service names `postgres1` and `postgres2`.
   results. The coordinator image is slow to build the first time because it
   compiles the custom DuckDB/PostgreSQL scanner and the Java rewriter.
 
-To generate data with the commonly used TPC-H kit:
+Generate SF1 with the included script:
 
 ```bash
-git clone https://github.com/gregrahn/tpch-kit.git
-cd tpch-kit/dbgen
-make MACHINE=LINUX DATABASE=POSTGRESQL
-./dbgen -s 1
+./generate_tpch_data.sh
 ```
 
-The `-s` value must match `TPCH_SCALE` in the experiment env file.
+The script clones `gregrahn/tpch-kit` under `.accio-docker/tpch-kit`, builds
+`dbgen` locally, generates all eight `.tbl` files under
+`.accio-docker/tpch-data/sf1`, verifies them, and prints the exact
+`TPCH_SCALE` and `TPCH_DATA_DIR_*` values for the experiment env file. It needs
+`git`, `make`, and a C compiler.
+
+Useful examples:
+
+```bash
+# Default SF1 under .accio-docker/tpch-data/sf1
+./generate_tpch_data.sh
+
+# SF10 in a specific output directory
+./generate_tpch_data.sh 10 /data/tpch/sf10
+```
+
+The first positional argument is the scale and the optional second argument is
+the output directory. Existing `.tbl` files are overwritten by dbgen. The
+selected scale must match `TPCH_SCALE` in the experiment env file.
 
 ## Local three-container quick start
 
-Create the active config and replace all three data paths with absolute paths:
+Generate the data, then create the active config and use the absolute paths
+printed by the generator:
 
 ```bash
+./generate_tpch_data.sh 1
 cp docker/experiment.env.example docker/experiment.env
 $EDITOR docker/experiment.env
 ```
