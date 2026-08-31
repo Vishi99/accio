@@ -16,6 +16,7 @@ Usage:
   ./run_multinode_experiments.sh config
   ./run_multinode_experiments.sh build
   ./run_multinode_experiments.sh deploy
+  ./run_multinode_experiments.sh fresh
   ./run_multinode_experiments.sh logs
   ./run_multinode_experiments.sh rerun
   ./run_multinode_experiments.sh status
@@ -28,6 +29,7 @@ Commands:
   config  Render and validate the fully interpolated Compose/Stack definition.
   build   Build locally, or build and push registry images in Swarm mode.
   deploy  Start the sources and submit the one-shot coordinator experiment.
+  fresh   Compose only: delete both PostgreSQL volumes, then deploy from scratch.
   logs    Follow the coordinator output.
   rerun   Submit the coordinator experiment again without reloading PostgreSQL.
   status  Show container/service state.
@@ -200,6 +202,35 @@ deploy() {
     log "deployment submitted; use '$0 logs' to follow the experiment"
 }
 
+fresh() {
+    require_docker
+    validate_inputs
+    [ "$DEPLOY_MODE" = "compose" ] || \
+        die "fresh is only available in Compose mode; Swarm volumes are node-local"
+
+    local postgres1_id postgres2_id postgres1_volume postgres2_volume
+    postgres1_id="$(compose ps -q postgres1)"
+    postgres2_id="$(compose ps -q postgres2)"
+    [ -n "$postgres1_id" ] && [ -n "$postgres2_id" ] || \
+        die "postgres containers are not present; run deploy once before fresh"
+
+    postgres1_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres1_id")"
+    postgres2_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres2_id")"
+    [ -n "$postgres1_volume" ] && [ -n "$postgres2_volume" ] || \
+        die "could not resolve the PostgreSQL data volumes"
+    [ "$postgres1_volume" != "$postgres2_volume" ] || \
+        die "both PostgreSQL services unexpectedly use the same data volume"
+
+    log "removing PostgreSQL data volumes: $postgres1_volume $postgres2_volume"
+    compose down
+    docker volume rm "$postgres1_volume" "$postgres2_volume"
+    if docker volume inspect "$postgres1_volume" >/dev/null 2>&1 || \
+       docker volume inspect "$postgres2_volume" >/dev/null 2>&1; then
+        die "a PostgreSQL data volume still exists after removal"
+    fi
+    deploy
+}
+
 logs() {
     require_docker
     if [ "$DEPLOY_MODE" = "compose" ]; then
@@ -250,6 +281,7 @@ main() {
         config) validate_config ;;
         build) build_images ;;
         deploy) deploy ;;
+        fresh) fresh ;;
         logs) logs ;;
         rerun) rerun ;;
         status) status ;;

@@ -118,6 +118,18 @@ Then validate, build, deploy, and follow the experiment:
 ./run_multinode_experiments.sh logs
 ```
 
+To discard both PostgreSQL databases and perform a guaranteed fresh Compose
+load, use:
+
+```bash
+./run_multinode_experiments.sh fresh
+```
+
+`fresh` permanently removes the two PostgreSQL data volumes resolved from the
+running containers, verifies their removal, and redeploys. It retains the
+coordinator results volume and the source `.tbl` files. It is intentionally not
+available in Swarm mode because those volumes reside on separate nodes.
+
 The coordinator is intentionally a one-shot container and shows as `Exited (0)`
 after success. PostgreSQL remains running. Run the same experiment again without
 reloading data with:
