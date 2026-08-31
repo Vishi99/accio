@@ -1,5 +1,8 @@
 FROM python:3.11-bookworm
 
+ARG POSTGRESSCANNER_REPOSITORY=https://github.com/wangxiaoying/postgresscanner.git
+ARG POSTGRESSCANNER_REF=prallel_query
+
 ENV DEBIAN_FRONTEND=noninteractive \
     POETRY_VIRTUALENVS_CREATE=false \
     PYTHONUNBUFFERED=1 \
@@ -19,8 +22,11 @@ RUN apt-get update \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --branch parallel_query --recurse-submodules \
-        https://github.com/wangxiaoying/postgresscanner.git /opt/postgresscanner \
+RUN git clone --depth 1 \
+        --branch "$POSTGRESSCANNER_REF" \
+        --recurse-submodules \
+        --shallow-submodules \
+        "$POSTGRESSCANNER_REPOSITORY" /opt/postgresscanner \
     && make -C /opt/postgresscanner
 
 WORKDIR /opt/accio

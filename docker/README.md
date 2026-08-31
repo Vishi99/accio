@@ -340,6 +340,9 @@ runner.
   source node and confirm all tables assigned to it exist there.
 - The coordinator reports metadata or table mismatch: the PostgreSQL volume was
   initialized with another placement; follow the volume reset procedure.
+- `Remote branch parallel_query not found`: use
+  `POSTGRESSCANNER_REF=prallel_query`. The fork currently publishes the branch
+  with that spelling; the example env file already contains the corrected ref.
 - A Swarm service remains at `0/1`: run `docker service ps --no-trunc SERVICE`.
   A rejected task commonly means a missing node label, missing bind path, image
   pull failure, or insufficient memory.

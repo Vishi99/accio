@@ -89,6 +89,9 @@ services:
     build:
       context: .
       dockerfile: docker/coordinator/Dockerfile
+      args:
+        POSTGRESSCANNER_REPOSITORY: ${POSTGRESSCANNER_REPOSITORY:-https://github.com/wangxiaoying/postgresscanner.git}
+        POSTGRESSCANNER_REF: ${POSTGRESSCANNER_REF:-prallel_query}
     command: ["python", "/opt/accio/docker/coordinator/run_experiment.py"]
     networks:
       - experiment

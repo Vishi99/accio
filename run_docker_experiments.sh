@@ -78,7 +78,7 @@ Notes:
   - DuckDB is embedded in the Accio container; it is not a separate service.
   - BANDWIDTH limits each PostgreSQL container independently. Two concurrent
     sources can therefore deliver up to twice that rate in aggregate.
-  - The Accio image builds the postgresscanner parallel_query fork and can take
+  - The Accio image builds the postgresscanner prallel_query fork and can take
     a while on its first build.
 EOF
 }
