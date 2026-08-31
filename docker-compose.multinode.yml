@@ -1,0 +1,151 @@
+x-postgres-common: &postgres-common
+  image: ${ACCIO_POSTGRES_IMAGE:-accio-postgres:latest}
+  build:
+    context: .
+    dockerfile: docker/postgres/Dockerfile
+    args:
+      POSTGRES_BASE_IMAGE: ${POSTGRES_BASE_IMAGE:-postgres:16-bookworm}
+  cap_add:
+    - NET_ADMIN
+  networks:
+    - experiment
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 30s
+  environment: &postgres-environment
+    POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the experiment env file}
+    POSTGRES_DB: tpch${TPCH_SCALE:-1}
+    TPCH_SCALE: ${TPCH_SCALE:-1}
+    TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
+    TPCH_TABLES_DB1: ${TPCH_TABLES_DB1:-}
+    TPCH_TABLES_DB2: ${TPCH_TABLES_DB2:-}
+    TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
+    DB_STATS_TARGET: ${DB_STATS_TARGET:-100}
+    BANDWIDTH: ${BANDWIDTH:-none}
+  command:
+    - postgres
+    - -c
+    - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+    - -c
+    - max_connections=${PG_MAX_CONNECTIONS:-100}
+    - -c
+    - max_worker_processes=${PG_MAX_WORKERS:-8}
+    - -c
+    - max_parallel_workers=${PG_MAX_WORKERS:-8}
+    - -c
+    - max_parallel_workers_per_gather=${PG_PARALLEL_WORKERS_PER_GATHER:-4}
+    - -c
+    - from_collapse_limit=16
+    - -c
+    - join_collapse_limit=16
+  shm_size: ${PG_SHM_SIZE:-2gb}
+  restart: unless-stopped
+
+services:
+  postgres1:
+    <<: *postgres-common
+    hostname: postgres1
+    environment:
+      <<: *postgres-environment
+      TPCH_SOURCE_ID: db1
+    volumes:
+      - postgres1-data:/var/lib/postgresql/data
+      - type: bind
+        source: ${TPCH_DATA_DIR_DB1:?set TPCH_DATA_DIR_DB1 to an absolute path on the postgres1 node}
+        target: /tpch-data
+        read_only: true
+    deploy:
+      placement:
+        constraints:
+          - node.labels.accio.role == postgres1
+      restart_policy:
+        condition: on-failure
+
+  postgres2:
+    <<: *postgres-common
+    hostname: postgres2
+    environment:
+      <<: *postgres-environment
+      TPCH_SOURCE_ID: db2
+    volumes:
+      - postgres2-data:/var/lib/postgresql/data
+      - type: bind
+        source: ${TPCH_DATA_DIR_DB2:?set TPCH_DATA_DIR_DB2 to an absolute path on the postgres2 node}
+        target: /tpch-data
+        read_only: true
+    deploy:
+      placement:
+        constraints:
+          - node.labels.accio.role == postgres2
+      restart_policy:
+        condition: on-failure
+
+  coordinator:
+    image: ${ACCIO_COORDINATOR_IMAGE:-accio-coordinator:latest}
+    build:
+      context: .
+      dockerfile: docker/coordinator/Dockerfile
+    command: ["python", "/opt/accio/docker/coordinator/run_experiment.py"]
+    networks:
+      - experiment
+    depends_on:
+      - postgres1
+      - postgres2
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the experiment env file}
+      POSTGRES_DB: tpch${TPCH_SCALE:-1}
+      DB1_HOST: postgres1
+      DB1_PORT: 5432
+      DB2_HOST: postgres2
+      DB2_PORT: 5432
+      TPCH_SCALE: ${TPCH_SCALE:-1}
+      TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
+      TPCH_TABLES_DB1: ${TPCH_TABLES_DB1:-}
+      TPCH_TABLES_DB2: ${TPCH_TABLES_DB2:-}
+      TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
+      TPCH_DATA_MOUNT: /tpch-data
+      ACCIO_RUNS: ${ACCIO_RUNS:-1}
+      ACCIO_QUERY: ${ACCIO_QUERY:-}
+      WORKLOAD_DIR: ${WORKLOAD_DIR:-}
+      ACCIO_STRATEGY: ${ACCIO_STRATEGY:-benefit}
+      ACCIO_CORES: ${ACCIO_CORES:-4}
+      ACCIO_MEMORY: ${ACCIO_MEMORY:-8GB}
+      ACCIO_EXPLAIN: ${ACCIO_EXPLAIN:-false}
+      PG_MAX_PARALLELISM: ${PG_MAX_PARALLELISM:-8}
+      COST_JOIN: ${COST_JOIN:-2.0}
+      COST_AGG: ${COST_AGG:-2.0}
+      COST_SORT: ${COST_SORT:-2.0}
+      COST_TRANSFER: ${COST_TRANSFER:-10.0}
+      STARTUP_TIMEOUT_SECONDS: ${STARTUP_TIMEOUT_SECONDS:-7200}
+    volumes:
+      - coordinator-results:/experiment/results
+      - type: bind
+        source: ${TPCH_DATA_DIR_COORDINATOR:?set TPCH_DATA_DIR_COORDINATOR to an absolute path on the coordinator node}
+        target: /tpch-data
+        read_only: true
+    deploy:
+      placement:
+        constraints:
+          - node.labels.accio.role == coordinator
+      restart_policy:
+        condition: none
+      resources:
+        limits:
+          cpus: "${ACCIO_CORES:-4}"
+          memory: ${COORDINATOR_MEMORY_LIMIT:-10GB}
+    restart: "no"
+
+networks:
+  experiment:
+    driver: ${NETWORK_DRIVER:-bridge}
+    attachable: true
+
+volumes:
+  postgres1-data:
+  postgres2-data:
+  coordinator-results:

@@ -4,3 +4,5 @@ __pycache__/
 rewriter/target
 rewriter/src/test/
 .accio-docker/
+docker/experiment.env
+accio-results/

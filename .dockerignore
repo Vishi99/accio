@@ -1,0 +1,11 @@
+.git
+.github
+.accio-docker
+accio-results
+artifacts
+spark-warehouse
+rewriter/target
+**/__pycache__
+**/*.pyc
+accio_technical_report.pdf
+docker/experiment.env
