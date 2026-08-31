@@ -83,7 +83,11 @@ is_known_table() {
 load_table() {
     local table="$1"
     local input_file="${DATA_DIR}/${table}.tbl"
-    [ -f "$input_file" ] || die "Missing $input_file; mount the matching dbgen output at $DATA_DIR"
+    if [ ! -r "$input_file" ]; then
+        log "contents visible under $DATA_DIR:"
+        ls -la "$DATA_DIR" >&2 || true
+        die "Missing or unreadable $input_file; check the bind source and host permissions"
+    fi
 
     log "loading $table from $input_file"
     table_ddl "$table" | psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"

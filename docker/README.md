@@ -114,6 +114,9 @@ the default generator invocation this is
 `/absolute/path/to/accio/.accio-docker/tpch-data/sf1`, not its parent
 `.../tpch-data`. In Compose mode, the wrapper verifies every table required by
 the configured distribution before building, deploying, or deleting volumes.
+The generator also grants directory traversal and file-read permissions so the
+non-root `postgres` user can consume the bind-mounted files, even when the host
+uses a restrictive umask.
 
 Then validate, build, deploy, and follow the experiment:
 

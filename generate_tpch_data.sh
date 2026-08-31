@@ -46,6 +46,11 @@ for table in $TABLES; do
     [ -s "$OUTPUT_DIR/${table}.tbl" ] || die "Missing generated file: $OUTPUT_DIR/${table}.tbl"
 done
 
+# dbgen inherits the caller's umask. Ensure the non-root postgres user inside
+# the containers can traverse the bind-mounted directory and read its files.
+chmod a+rx "$OUTPUT_DIR"
+chmod a+r "$OUTPUT_DIR"/*.tbl
+
 printf '[tpch-dbgen] Done: %s\n' "$(du -sh "$OUTPUT_DIR" | awk '{print $1}')"
 cat <<EOF
 
