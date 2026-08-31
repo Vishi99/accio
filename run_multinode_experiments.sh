@@ -115,6 +115,56 @@ validate_table_distribution() {
     done
 }
 
+default_source_tables() {
+    case "${TPCH_PLACEMENT}:${1}" in
+        v0:db1) printf '%s\n' "region nation supplier customer orders lineitem" ;;
+        v0:db2) printf '%s\n' "part partsupp" ;;
+        v1:db1) printf '%s\n' "region nation supplier customer part partsupp" ;;
+        v1:db2) printf '%s\n' "orders lineitem" ;;
+        v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
+        v2:db2) printf '%s\n' "region nation supplier customer" ;;
+        *) die "cannot resolve table distribution for ${TPCH_PLACEMENT}:${1}" ;;
+    esac
+}
+
+configured_tables_for() {
+    local target="$1"
+    local override=""
+    local table
+    case "$target" in
+        db1) override="${TPCH_TABLES_DB1:-}" ;;
+        db2) override="${TPCH_TABLES_DB2:-}" ;;
+        coordinator) printf '%s\n' "${TPCH_TABLES_COORDINATOR:-}"; return ;;
+        *) die "unknown table target: $target" ;;
+    esac
+    if [ -n "$override" ]; then
+        printf '%s\n' "$override"
+        return
+    fi
+    for table in $(default_source_tables "$target"); do
+        case " ${TPCH_TABLES_COORDINATOR:-} " in
+            *" $table "*) ;;
+            *) printf '%s\n' "$table" ;;
+        esac
+    done
+}
+
+validate_compose_data_files() {
+    local target data_dir table
+    for target in db1 db2 coordinator; do
+        case "$target" in
+            db1) data_dir="$TPCH_DATA_DIR_DB1" ;;
+            db2) data_dir="$TPCH_DATA_DIR_DB2" ;;
+            coordinator) data_dir="$TPCH_DATA_DIR_COORDINATOR" ;;
+        esac
+        [ -d "$data_dir" ] || die "TPC-H data directory for $target does not exist: $data_dir"
+        for table in $(configured_tables_for "$target"); do
+            [ -s "$data_dir/$table.tbl" ] || \
+                die "Missing $data_dir/$table.tbl required by $target"
+        done
+    done
+}
+
 validate_inputs() {
     case "${TPCH_PLACEMENT:-}" in
         v0|v1|v2) ;;
@@ -142,7 +192,9 @@ validate_inputs() {
     esac
     validate_table_distribution
 
-    if [ "$DEPLOY_MODE" = "swarm" ]; then
+    if [ "$DEPLOY_MODE" = "compose" ]; then
+        validate_compose_data_files
+    else
         case "${ACCIO_COORDINATOR_IMAGE:-}" in
             */*) ;;
             *) die "Use a registry-qualified ACCIO_COORDINATOR_IMAGE in Swarm mode" ;;

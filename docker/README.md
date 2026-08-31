@@ -109,6 +109,12 @@ TPCH_DATA_DIR_DB2=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_COORDINATOR=/absolute/path/to/tpch-dbgen-output
 ```
 
+Each path must name the directory that directly contains the `.tbl` files. For
+the default generator invocation this is
+`/absolute/path/to/accio/.accio-docker/tpch-data/sf1`, not its parent
+`.../tpch-data`. In Compose mode, the wrapper verifies every table required by
+the configured distribution before building, deploying, or deleting volumes.
+
 Then validate, build, deploy, and follow the experiment:
 
 ```bash
