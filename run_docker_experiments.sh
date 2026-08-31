@@ -25,6 +25,7 @@ ACCIO_CORES="${ACCIO_CORES:-4}"
 ACCIO_MEMORY="${ACCIO_MEMORY:-8GB}"
 ACCIO_RUNS="${ACCIO_RUNS:-1}"
 ACCIO_STRATEGY="${ACCIO_STRATEGY:-benefit}"
+POSTGRESSCANNER_BUILD_JOBS="${POSTGRESSCANNER_BUILD_JOBS:-4}"
 STATE_DIR="${STATE_DIR:-${SCRIPT_DIR}/.accio-docker/${PROJECT_NAME}}"
 CONFIG_DIR="${STATE_DIR}/config"
 RESULTS_DIR="${STATE_DIR}/results"
@@ -68,6 +69,7 @@ Useful environment overrides:
   ACCIO_STRATEGY=benefit   Accio rewrite strategy
   PG_SHARED_BUFFERS=1GB    PostgreSQL shared_buffers
   PG_SHM_SIZE=2g           PostgreSQL container /dev/shm size
+  POSTGRESSCANNER_BUILD_JOBS=4  Scanner image build concurrency
 
 Examples:
   TPCH_DATA_DIR=/data/tpch-sf1 ./run_docker_experiments.sh experiment v1 q05
@@ -142,6 +144,7 @@ build_accio_image() {
     log "Building $ACCIO_IMAGE (includes the custom DuckDB/Postgres scanner)"
     docker build \
         --tag "$ACCIO_IMAGE" \
+        --build-arg "POSTGRESSCANNER_BUILD_JOBS=$POSTGRESSCANNER_BUILD_JOBS" \
         --file "$SCRIPT_DIR/docker/coordinator/Dockerfile" \
         "$SCRIPT_DIR"
 }

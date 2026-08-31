@@ -342,8 +342,38 @@ runner when all three containers live on one Docker daemon and repeated `v0`,
 currently supported by `run_multinode_experiments.sh`, not by this legacy
 runner.
 
+The legacy runner streams benchmark output to the terminal and also saves it
+on the host under `.accio-docker/accio-expt-sf<SCALE>/results/` (or under the
+custom `STATE_DIR`). For example:
+
+```bash
+ls -lh .accio-docker/accio-expt-sf1/results/
+tail -f .accio-docker/accio-expt-sf1/results/*.log
+```
+
+For the multinode runner, `./run_multinode_experiments.sh logs` follows the
+coordinator. Follow PostgreSQL loading logs with:
+
+```bash
+# Local Compose
+docker compose --env-file docker/experiment.env \
+  -f docker-compose.multinode.yml logs -f postgres1 postgres2
+
+# Swarm
+docker service logs -f "${STACK_NAME}_postgres1"
+docker service logs -f "${STACK_NAME}_postgres2"
+```
+
+Multinode result logs and DuckDB database files live in the
+`coordinator-results` volume; use the `docker cp` commands in the local or
+Swarm sections above to copy them out.
+
 ## Troubleshooting
 
+- During a fresh load, an older coordinator image may cause PostgreSQL to log
+  `relation "accio_dataset_metadata" does not exist`. This is a harmless
+  readiness check while the loader is still working. Rebuild the coordinator
+  image to use the quiet readiness probe and periodic progress messages.
 - A source repeatedly fails with `Missing ...tbl`: verify the bind path on that
   source node and confirm all tables assigned to it exist there.
 - The coordinator reports metadata or table mismatch: the PostgreSQL volume was

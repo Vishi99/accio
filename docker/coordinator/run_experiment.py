@@ -142,21 +142,34 @@ def wait_for_source(
     scale: str,
     timeout: int,
 ) -> None:
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    next_progress_report = started + 30
     last_error = "not attempted"
+    print(
+        f"[accio-coordinator] waiting for {source} to load "
+        f"{sorted(expected_tables)} (timeout: {timeout}s)",
+        flush=True,
+    )
     while time.monotonic() < deadline:
         try:
             with psycopg2.connect(**connection_kwargs(config)) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
-                        """
-                        SELECT placement, source_id, table_list, scale
-                        FROM accio_dataset_metadata
-                        ORDER BY loaded_at DESC
-                        LIMIT 1
-                        """
+                        "SELECT to_regclass('public.accio_dataset_metadata')"
                     )
-                    metadata = cursor.fetchone()
+                    metadata_table = cursor.fetchone()[0]
+                    metadata = None
+                    if metadata_table is not None:
+                        cursor.execute(
+                            """
+                            SELECT placement, source_id, table_list, scale
+                            FROM accio_dataset_metadata
+                            ORDER BY loaded_at DESC
+                            LIMIT 1
+                            """
+                        )
+                        metadata = cursor.fetchone()
                     cursor.execute(
                         """
                         SELECT table_name
@@ -173,11 +186,28 @@ def wait_for_source(
                     "reset the PostgreSQL volume after changing TPCH_SCALE"
                 ) from error
             last_error = str(error)
+            now = time.monotonic()
+            if now >= next_progress_report:
+                detail = " ".join(last_error.splitlines())
+                print(
+                    f"[accio-coordinator] still waiting for {source} "
+                    f"after {int(now - started)}s: {detail}",
+                    flush=True,
+                )
+                next_progress_report = now + 30
             time.sleep(5)
             continue
 
         if metadata is None:
             last_error = "accio_dataset_metadata is empty"
+            now = time.monotonic()
+            if now >= next_progress_report:
+                print(
+                    f"[accio-coordinator] still waiting for {source} "
+                    f"after {int(now - started)}s: {last_error}",
+                    flush=True,
+                )
+                next_progress_report = now + 30
             time.sleep(5)
             continue
         actual_placement, actual_source, _, actual_scale = metadata

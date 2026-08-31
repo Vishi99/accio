@@ -178,6 +178,9 @@ build_images() {
         "$SCRIPT_DIR"
     docker build \
         --tag "$ACCIO_COORDINATOR_IMAGE" \
+        --build-arg "POSTGRESSCANNER_REPOSITORY=${POSTGRESSCANNER_REPOSITORY:-https://github.com/wangxiaoying/postgresscanner.git}" \
+        --build-arg "POSTGRESSCANNER_REF=${POSTGRESSCANNER_REF:-prallel_query}" \
+        --build-arg "POSTGRESSCANNER_BUILD_JOBS=${POSTGRESSCANNER_BUILD_JOBS:-4}" \
         --file "$SCRIPT_DIR/docker/coordinator/Dockerfile" \
         "$SCRIPT_DIR"
     docker push "$ACCIO_POSTGRES_IMAGE"
@@ -200,8 +203,10 @@ deploy() {
 logs() {
     require_docker
     if [ "$DEPLOY_MODE" = "compose" ]; then
+        compose ps --all
         compose logs --follow coordinator
     else
+        docker service ps --no-trunc "${STACK_NAME}_coordinator"
         docker service logs --follow "${STACK_NAME}_coordinator"
     fi
 }
