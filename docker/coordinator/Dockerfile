@@ -31,7 +31,9 @@ RUN git clone --depth 1 \
 
 # The fork hard-codes OpenSSL 1.1 paths. Bookworm provides OpenSSL 3, so let
 # CMake discover the system headers and libraries installed by libssl-dev.
-RUN make -C /opt/postgresscanner OPENSSL_FLAG=
+ARG POSTGRESSCANNER_BUILD_JOBS=4
+RUN CMAKE_BUILD_PARALLEL_LEVEL="$POSTGRESSCANNER_BUILD_JOBS" \
+    make -C /opt/postgresscanner OPENSSL_FLAG= GEN=ninja
 
 WORKDIR /opt/accio
 COPY . /opt/accio

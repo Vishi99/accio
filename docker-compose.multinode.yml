@@ -92,6 +92,7 @@ services:
       args:
         POSTGRESSCANNER_REPOSITORY: ${POSTGRESSCANNER_REPOSITORY:-https://github.com/wangxiaoying/postgresscanner.git}
         POSTGRESSCANNER_REF: ${POSTGRESSCANNER_REF:-prallel_query}
+        POSTGRESSCANNER_BUILD_JOBS: ${POSTGRESSCANNER_BUILD_JOBS:-4}
     command: ["python", "/opt/accio/docker/coordinator/run_experiment.py"]
     networks:
       - experiment

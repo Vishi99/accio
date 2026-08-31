@@ -54,6 +54,14 @@ on the deployment network under the service names `postgres1` and `postgres2`.
   results. The coordinator image is slow to build the first time because it
   compiles the custom DuckDB/PostgreSQL scanner and the Java rewriter.
 
+The scanner build uses Ninja and four parallel compile jobs by default. Set
+`POSTGRESSCANNER_BUILD_JOBS` in `docker/experiment.env` to the number of jobs
+your Docker VM can comfortably support. More jobs usually shorten the first
+build; if the build is killed or reports an out-of-memory error, reduce it to
+`2` or `1`. Once a build succeeds, Docker caches that layer, so later builds do
+not recompile the scanner unless its Dockerfile, repository, ref, or build-job
+setting changes.
+
 Generate SF1 with the included script:
 
 ```bash
