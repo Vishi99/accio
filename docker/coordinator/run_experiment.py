@@ -280,7 +280,16 @@ def load_coordinator_tables(
                 raise SystemExit(f"[accio-coordinator] missing coordinator data file: {input_file}")
             print(f"[accio-coordinator] loading local DuckDB table {table}", flush=True)
             columns = TPCH_COLUMNS[table]
-            csv_columns = columns + [("_accio_trailing", "VARCHAR")]
+            with input_file.open("rb") as input_stream:
+                first_row = input_stream.readline().rstrip(b"\r\n")
+            if not first_row:
+                raise SystemExit(f"[accio-coordinator] coordinator data file is empty: {input_file}")
+            has_trailing_delimiter = first_row.endswith(b"|")
+            csv_columns = (
+                columns + [("_accio_trailing", "VARCHAR")]
+                if has_trailing_delimiter
+                else columns
+            )
             columns_sql = ", ".join(
                 f"'{name}': '{data_type}'" for name, data_type in csv_columns
             )
