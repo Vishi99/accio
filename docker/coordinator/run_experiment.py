@@ -294,6 +294,7 @@ def load_coordinator_tables(
                     '{file_sql}',
                     delim = '|',
                     header = false,
+                    auto_detect = false,
                     columns = {{{columns_sql}}}
                 )
                 """
