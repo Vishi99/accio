@@ -181,12 +181,18 @@ def wait_for_source(
                     )
                     actual_tables = {row[0] for row in cursor.fetchall()}
         except Exception as error:  # readiness failures are retried until the deadline
-            if getattr(error, "pgcode", None) == "3D000":
+            error_text = str(error)
+            sqlstate = getattr(error, "pgcode", None) or getattr(
+                getattr(error, "diag", None), "sqlstate", None
+            )
+            if sqlstate == "3D000" or re.search(
+                r'database "[^"]+" does not exist', error_text, re.IGNORECASE
+            ):
                 raise SystemExit(
                     f"[accio-coordinator] configured database is absent on {source}; "
                     "reset the PostgreSQL volume after changing TPCH_SCALE"
                 ) from error
-            last_error = str(error)
+            last_error = error_text
             now = time.monotonic()
             if now >= next_progress_report:
                 detail = " ".join(last_error.splitlines())
@@ -371,60 +377,66 @@ def main() -> None:
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_name = f"tpch-sf{scale}-{placement}-{query or 'all'}-{timestamp}"
-    database_path = results_dir / f"{run_name}.duckdb"
-    load_coordinator_tables(
-        database_path,
-        tables["coordinator"],
-        Path(env("TPCH_DATA_MOUNT", "/tpch-data")),
-    )
-    command = [
-        sys.executable,
-        "/opt/accio/benchmark/bench_duckdb.py",
-        "accio",
-        "--config",
-        str(config_dir),
-        "--workload",
-        str(workload),
-        "--strategy",
-        env("ACCIO_STRATEGY", "benefit"),
-        "--runs",
-        env("ACCIO_RUNS", "1"),
-        "--cores",
-        env("ACCIO_CORES", "4"),
-        "--memory",
-        env("ACCIO_MEMORY", "8GB"),
-        "--dbfile",
-        str(database_path),
-    ]
-    if query:
-        command.extend(["--query", query])
-    if os.environ.get("ACCIO_EXPLAIN", "false").lower() in {"1", "true", "yes"}:
-        command.append("--explain")
-    command.extend(["db1", "db2"])
-
+    work_dir = Path("/tmp/accio-runs") / run_name
+    database_path = work_dir / "run.duckdb"
     log_path = results_dir / f"{run_name}.log"
-    print(f"[accio-coordinator] running: {shlex.join(command)}", flush=True)
-    print(f"[accio-coordinator] result log: {log_path}", flush=True)
-    with log_path.open("w", encoding="utf-8") as log_file:
-        process = subprocess.Popen(
-            command,
-            cwd="/opt/accio",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+    shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True)
+    try:
+        load_coordinator_tables(
+            database_path,
+            tables["coordinator"],
+            Path(env("TPCH_DATA_MOUNT", "/tpch-data")),
         )
-        assert process.stdout is not None
-        for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            log_file.write(line)
-            log_file.flush()
-        return_code = process.wait()
+        command = [
+            sys.executable,
+            "/opt/accio/benchmark/bench_duckdb.py",
+            "accio",
+            "--config",
+            str(config_dir),
+            "--workload",
+            str(workload),
+            "--strategy",
+            env("ACCIO_STRATEGY", "benefit"),
+            "--runs",
+            env("ACCIO_RUNS", "1"),
+            "--cores",
+            env("ACCIO_CORES", "4"),
+            "--memory",
+            env("ACCIO_MEMORY", "8GB"),
+            "--dbfile",
+            str(database_path),
+        ]
+        if query:
+            command.extend(["--query", query])
+        if os.environ.get("ACCIO_EXPLAIN", "false").lower() in {"1", "true", "yes"}:
+            command.append("--explain")
+        command.extend(["db1", "db2"])
 
-    if return_code:
-        raise SystemExit(return_code)
-    print(f"[accio-coordinator] experiment completed successfully: {run_name}", flush=True)
+        print(f"[accio-coordinator] running: {shlex.join(command)}", flush=True)
+        print(f"[accio-coordinator] result log: {log_path}", flush=True)
+        with log_path.open("w", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                command,
+                cwd="/opt/accio",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert process.stdout is not None
+            for line in process.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log_file.write(line)
+                log_file.flush()
+            return_code = process.wait()
+
+        if return_code:
+            raise SystemExit(return_code)
+        print(f"[accio-coordinator] experiment completed successfully: {run_name}", flush=True)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

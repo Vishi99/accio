@@ -127,7 +127,9 @@ services:
       COST_TRANSFER: ${COST_TRANSFER:-10.0}
       STARTUP_TIMEOUT_SECONDS: ${STARTUP_TIMEOUT_SECONDS:-7200}
     volumes:
-      - coordinator-results:/experiment/results
+      - type: bind
+        source: ${ACCIO_RESULTS_DIR:?set ACCIO_RESULTS_DIR to an absolute host path for result logs}
+        target: /experiment/results
       - type: bind
         source: ${TPCH_DATA_DIR_COORDINATOR:?set TPCH_DATA_DIR_COORDINATOR to an absolute path on the coordinator node}
         target: /tpch-data
@@ -152,4 +154,3 @@ networks:
 volumes:
   postgres1-data:
   postgres2-data:
-  coordinator-results:

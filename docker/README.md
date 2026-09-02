@@ -8,9 +8,8 @@ data sources. It supports both:
 
 The PostgreSQL containers load their assigned TPC-H `.tbl` files only when
 their data volumes are first created. The coordinator waits for both loads,
-checks that the physical table distribution matches the configuration, loads
-any coordinator-assigned tables into DuckDB, writes the Accio source configs,
-and runs the selected `tpch2_v*` workload.
+checks that the physical table distribution matches the configuration, writes
+the Accio source configs, and runs the selected `tpch2_v*` workload.
 
 ## Files
 
@@ -31,9 +30,9 @@ and runs the selected `tpch2_v*` workload.
   coordinator node                                  source nodes
   +--------------------+          +---------------------------------------+
   | Accio + DuckDB     |--------->| postgres1 (Accio schema name: db1)   |
-  | optional local     |          | assigned subset of TPC-H tables      |
-  | TPC-H tables,      |          +---------------------------------------+
-  | local execution    |--------->| postgres2 (Accio schema name: db2)   |
+  | query planning and |          | assigned subset of TPC-H tables      |
+  | local execution    |          +---------------------------------------+
+  |                    |--------->| postgres2 (Accio schema name: db2)   |
   +--------------------+          | assigned subset of TPC-H tables      |
                                   +---------------------------------------+
 ```
@@ -107,6 +106,8 @@ NETWORK_DRIVER=bridge
 TPCH_DATA_DIR_DB1=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_DB2=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_COORDINATOR=/absolute/path/to/tpch-dbgen-output
+ACCIO_RESULTS_DIR=/absolute/path/to/accio-results
+ACCIO_EXPLAIN=true
 ```
 
 Each path must name the directory that directly contains the `.tbl` files. For
@@ -117,6 +118,17 @@ the configured distribution before building, deploying, or deleting volumes.
 The generator also grants directory traversal and file-read permissions so the
 non-root `postgres` user can consume the bind-mounted files, even when the host
 uses a restrictive umask.
+
+Create the results directory before validating or deploying:
+
+```bash
+mkdir -p /absolute/path/to/accio-results
+```
+
+Each run writes one timestamped `.log` directly into this host directory. The
+log contains runtimes and, when `ACCIO_EXPLAIN=true`, the Accio and DuckDB plans.
+The run's DuckDB database is created under the container's `/tmp` and deleted
+on completion or benchmark failure.
 
 Then validate, build, deploy, and follow the experiment:
 
@@ -135,8 +147,8 @@ load, use:
 ```
 
 `fresh` permanently removes the two PostgreSQL data volumes resolved from the
-running containers, verifies their removal, and redeploys. It retains the
-coordinator results volume and the source `.tbl` files. It is intentionally not
+running containers, verifies their removal, and redeploys. It does not modify
+`ACCIO_RESULTS_DIR` or the source `.tbl` files. It is intentionally not
 available in Swarm mode because those volumes reside on separate nodes.
 
 The coordinator is intentionally a one-shot container and shows as `Exited (0)`
@@ -154,15 +166,12 @@ Inspect or stop the deployment with:
 ./run_multinode_experiments.sh down
 ```
 
-`down` retains all named volumes. To copy result files locally, find the stopped
-coordinator container and use `docker cp`:
+`down` retains the PostgreSQL volumes and the host result logs. Read the latest
+logs directly without `docker cp`:
 
 ```bash
-set -a; source docker/experiment.env; set +a
-container_id=$(docker compose --env-file docker/experiment.env \
-  -f docker-compose.multinode.yml --project-name "$STACK_NAME" \
-  ps -aq coordinator)
-docker cp "${container_id}:/experiment/results/." ./accio-results
+ls -lt /absolute/path/to/accio-results
+less /absolute/path/to/accio-results/tpch-sf1-v1-all-TIMESTAMP.log
 ```
 
 ## Three-host Docker Swarm setup
@@ -195,7 +204,11 @@ DEPLOY_MODE=swarm
 TPCH_DATA_DIR_DB1=/data/tpch/sf1
 TPCH_DATA_DIR_DB2=/mnt/benchmarks/tpch/sf1
 TPCH_DATA_DIR_COORDINATOR=/data/tpch/sf1
+ACCIO_RESULTS_DIR=/data/accio-results
 ```
+
+Create `ACCIO_RESULTS_DIR` on the node labeled `accio.role=coordinator` before
+deploying the stack.
 
 Swarm nodes pull images rather than using the Compose `build` section. Set both
 image names to a registry reachable by every node:
@@ -229,15 +242,11 @@ Use these commands for operations:
 ```
 
 Coordinator logs can always be read from the manager with `docker service
-logs`. Result files are in the `${STACK_NAME}_coordinator-results` local volume
-on the node labeled `accio.role=coordinator`. To copy them, SSH to that node,
-find the completed task container, and use `docker cp`:
+logs`. Timestamped result logs are written directly to `ACCIO_RESULTS_DIR` on
+the node labeled `accio.role=coordinator`; SSH to that node to read them:
 
 ```bash
-set -a; source docker/experiment.env; set +a
-task_id=$(docker ps -aq \
-  --filter "label=com.docker.swarm.service.name=${STACK_NAME}_coordinator" | head -n1)
-docker cp "${task_id}:/experiment/results/." ./accio-results
+ls -lt /data/accio-results
 ```
 
 ## Experiment configuration
@@ -259,35 +268,24 @@ the default physical table distribution and the corresponding
 | `v1` (default) | region, nation, supplier, customer, part, partsupp | orders, lineitem | none |
 | `v2` | part, partsupp, orders, lineitem | region, nation, supplier, customer | none |
 
-To move tables from the selected default placement into the coordinator, set
-`TPCH_TABLES_COORDINATOR` and leave the two PostgreSQL overrides empty:
+For a completely explicit two-source distribution, set both PostgreSQL lists.
+Every TPC-H table must occur exactly once across them:
 
 ```dotenv
-TPCH_PLACEMENT=v1
-TPCH_TABLES_DB1=
-TPCH_TABLES_DB2=
-TPCH_TABLES_COORDINATOR="region nation"
-```
-
-This example produces `db1={supplier, customer, part, partsupp}`,
-`db2={orders, lineitem}`, and `coordinator={region, nation}`. The coordinator
-loads `region.tbl` and `nation.tbl` from `TPCH_DATA_DIR_COORDINATOR` into the
-run's DuckDB database. It also rewrites the checked-in workload so local tables
-are unqualified (`region`) while remote tables retain `db1.` or `db2.`.
-
-For a completely explicit three-way distribution, set all three lists. Every
-TPC-H table must occur exactly once across them:
-
-```dotenv
-TPCH_TABLES_DB1="supplier customer"
+TPCH_TABLES_DB1="region nation supplier customer part partsupp"
 TPCH_TABLES_DB2="orders lineitem"
-TPCH_TABLES_COORDINATOR="region nation part partsupp"
+TPCH_TABLES_COORDINATOR=
 ```
 
 Quote non-empty lists because the env file is also loaded as shell syntax.
 `WORKLOAD_DIR` can select another workload directory inside the coordinator
 image; its existing `db1.`/`db2.` table qualifiers are normalized to the
 configured ownership before execution.
+
+The loader accepts `TPCH_TABLES_COORDINATOR`, but the current Accio `benefit`
+and `pushdown` rewriters do not correctly plan coordinator-resident base tables.
+Keep that setting empty for executable benchmark runs. DuckDB still acts as the
+coordinator and executes the resulting federated plan.
 
 ### Accio and DuckDB
 
@@ -301,6 +299,8 @@ configured ownership before execution.
 - `COORDINATOR_MEMORY_LIMIT`: container limit; leave headroom above DuckDB for
   Python and the Accio rewriter JVM.
 - `ACCIO_EXPLAIN`: set to `true` to print Accio and DuckDB plans.
+- `ACCIO_RESULTS_DIR`: absolute host path receiving timestamped `.log` files.
+  No DuckDB database files are persisted there.
 - `STARTUP_TIMEOUT_SECONDS`: maximum wait per PostgreSQL source, including load.
 
 ### PostgreSQL and network
@@ -385,9 +385,8 @@ docker service logs -f "${STACK_NAME}_postgres1"
 docker service logs -f "${STACK_NAME}_postgres2"
 ```
 
-Multinode result logs and DuckDB database files live in the
-`coordinator-results` volume; use the `docker cp` commands in the local or
-Swarm sections above to copy them out.
+Result logs are available directly under `ACCIO_RESULTS_DIR`; transient DuckDB
+database files are deleted and do not need to be collected.
 
 ## Troubleshooting
 

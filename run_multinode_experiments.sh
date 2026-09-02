@@ -33,7 +33,7 @@ Commands:
   logs    Follow the coordinator output.
   rerun   Submit the coordinator experiment again without reloading PostgreSQL.
   status  Show container/service state.
-  down    Remove the deployment, retaining PostgreSQL and result volumes.
+  down    Remove the deployment, retaining PostgreSQL volumes and host result logs.
 EOF
 }
 
@@ -178,6 +178,7 @@ validate_inputs() {
     [ -n "${TPCH_DATA_DIR_DB1:-}" ] || die "TPCH_DATA_DIR_DB1 must be set"
     [ -n "${TPCH_DATA_DIR_DB2:-}" ] || die "TPCH_DATA_DIR_DB2 must be set"
     [ -n "${TPCH_DATA_DIR_COORDINATOR:-}" ] || die "TPCH_DATA_DIR_COORDINATOR must be set"
+    [ -n "${ACCIO_RESULTS_DIR:-}" ] || die "ACCIO_RESULTS_DIR must be set"
     case "$TPCH_DATA_DIR_DB1" in
         /*) ;;
         *) die "TPCH_DATA_DIR_DB1 must be an absolute path" ;;
@@ -190,9 +191,15 @@ validate_inputs() {
         /*) ;;
         *) die "TPCH_DATA_DIR_COORDINATOR must be an absolute path" ;;
     esac
+    case "$ACCIO_RESULTS_DIR" in
+        /*) ;;
+        *) die "ACCIO_RESULTS_DIR must be an absolute path" ;;
+    esac
     validate_table_distribution
 
     if [ "$DEPLOY_MODE" = "compose" ]; then
+        [ -d "$ACCIO_RESULTS_DIR" ] || \
+            die "ACCIO_RESULTS_DIR does not exist; create it first: $ACCIO_RESULTS_DIR"
         validate_compose_data_files
     else
         case "${ACCIO_COORDINATOR_IMAGE:-}" in
@@ -321,7 +328,7 @@ down() {
     else
         docker stack rm "$STACK_NAME"
     fi
-    log "deployment removed; named data and result volumes were retained"
+    log "deployment removed; PostgreSQL volumes and host result logs were retained"
 }
 
 main() {
