@@ -26,11 +26,14 @@ standard_tables() {
     case "${TPCH_PLACEMENT:-v1}:${SOURCE_ID}" in
         v0:db1) printf '%s\n' "region nation supplier customer orders lineitem" ;;
         v0:db2) printf '%s\n' "part partsupp" ;;
+        v0:db3) printf '%s\n' "" ;;
         v1:db1) printf '%s\n' "region nation supplier customer part partsupp" ;;
         v1:db2) printf '%s\n' "orders lineitem" ;;
+        v1:db3) printf '%s\n' "" ;;
         v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
         v2:db2) printf '%s\n' "region nation supplier customer" ;;
-        *) die "TPCH_PLACEMENT must be v0, v1, or v2 and TPCH_SOURCE_ID must be db1 or db2" ;;
+        v2:db3) printf '%s\n' "" ;;
+        *) die "TPCH_PLACEMENT must be v0, v1, or v2 and TPCH_SOURCE_ID must be db1, db2, or db3" ;;
     esac
 }
 
@@ -49,7 +52,8 @@ configured_tables() {
     case "$SOURCE_ID" in
         db1) override="${TPCH_TABLES_DB1:-}" ;;
         db2) override="${TPCH_TABLES_DB2:-}" ;;
-        *) die "TPCH_SOURCE_ID must be db1 or db2 (got: ${SOURCE_ID:-<empty>})" ;;
+        db3) override="${TPCH_TABLES_DB3:-}" ;;
+        *) die "TPCH_SOURCE_ID must be db1, db2, or db3 (got: ${SOURCE_ID:-<empty>})" ;;
     esac
 
     if [ -n "$override" ]; then

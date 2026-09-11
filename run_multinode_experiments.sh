@@ -8,7 +8,7 @@ ENV_FILE="${ACCIO_ENV_FILE:-${SCRIPT_DIR}/docker/experiment.env}"
 
 usage() {
     cat <<'EOF'
-Deploy DuckDB/Accio with two PostgreSQL TPC-H sources.
+Deploy DuckDB/Accio with three PostgreSQL TPC-H sources.
 
 Usage:
   cp docker/experiment.env.example docker/experiment.env
@@ -23,13 +23,13 @@ Usage:
   ./run_multinode_experiments.sh down
 
 Select another file with ACCIO_ENV_FILE=/path/to/file. Set DEPLOY_MODE=compose
-for one Docker host or DEPLOY_MODE=swarm for three labeled Swarm nodes.
+for one Docker host or DEPLOY_MODE=swarm for four labeled Swarm nodes.
 
 Commands:
   config  Render and validate the fully interpolated Compose/Stack definition.
   build   Build locally, or build and push registry images in Swarm mode.
   deploy  Start the sources and submit the one-shot coordinator experiment.
-  fresh   Compose only: delete both PostgreSQL volumes, then deploy from scratch.
+  fresh   Compose only: delete all PostgreSQL volumes, then deploy from scratch.
   logs    Follow the coordinator output.
   rerun   Submit the coordinator experiment again without reloading PostgreSQL.
   status  Show container/service state.
@@ -76,6 +76,7 @@ compose() {
 validate_table_distribution() {
     local db1_tables="${TPCH_TABLES_DB1:-}"
     local db2_tables="${TPCH_TABLES_DB2:-}"
+    local db3_tables="${TPCH_TABLES_DB3:-}"
     local coordinator_tables="${TPCH_TABLES_COORDINATOR:-}"
 
     local seen=" "
@@ -91,13 +92,13 @@ validate_table_distribution() {
         esac
     done
 
-    if [ -z "$db1_tables" ] && [ -z "$db2_tables" ]; then
+    if [ -z "$db1_tables" ] && [ -z "$db2_tables" ] && [ -z "$db3_tables" ]; then
         return
     fi
     [ -n "$db1_tables" ] && [ -n "$db2_tables" ] || \
-        die "Set both TPCH_TABLES_DB1 and TPCH_TABLES_DB2, or leave both empty"
+        die "Set TPCH_TABLES_DB1 and TPCH_TABLES_DB2 whenever any source override is used"
 
-    for table in $db1_tables $db2_tables; do
+    for table in $db1_tables $db2_tables $db3_tables; do
         case " region nation supplier customer part partsupp orders lineitem " in
             *" $table "*) ;;
             *) die "Unknown table in custom distribution: $table" ;;
@@ -123,6 +124,7 @@ default_source_tables() {
         v1:db2) printf '%s\n' "orders lineitem" ;;
         v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
         v2:db2) printf '%s\n' "region nation supplier customer" ;;
+        v0:db3|v1:db3|v2:db3) printf '%s\n' "" ;;
         *) die "cannot resolve table distribution for ${TPCH_PLACEMENT}:${1}" ;;
     esac
 }
@@ -134,6 +136,7 @@ configured_tables_for() {
     case "$target" in
         db1) override="${TPCH_TABLES_DB1:-}" ;;
         db2) override="${TPCH_TABLES_DB2:-}" ;;
+        db3) override="${TPCH_TABLES_DB3:-}" ;;
         coordinator) printf '%s\n' "${TPCH_TABLES_COORDINATOR:-}"; return ;;
         *) die "unknown table target: $target" ;;
     esac
@@ -151,10 +154,11 @@ configured_tables_for() {
 
 validate_compose_data_files() {
     local target data_dir table
-    for target in db1 db2 coordinator; do
+    for target in db1 db2 db3 coordinator; do
         case "$target" in
             db1) data_dir="$TPCH_DATA_DIR_DB1" ;;
             db2) data_dir="$TPCH_DATA_DIR_DB2" ;;
+            db3) data_dir="$TPCH_DATA_DIR_DB3" ;;
             coordinator) data_dir="$TPCH_DATA_DIR_COORDINATOR" ;;
         esac
         [ -d "$data_dir" ] || die "TPC-H data directory for $target does not exist: $data_dir"
@@ -177,6 +181,7 @@ validate_inputs() {
     [ -n "${POSTGRES_PASSWORD:-}" ] || die "POSTGRES_PASSWORD must not be empty"
     [ -n "${TPCH_DATA_DIR_DB1:-}" ] || die "TPCH_DATA_DIR_DB1 must be set"
     [ -n "${TPCH_DATA_DIR_DB2:-}" ] || die "TPCH_DATA_DIR_DB2 must be set"
+    [ -n "${TPCH_DATA_DIR_DB3:-}" ] || die "TPCH_DATA_DIR_DB3 must be set"
     [ -n "${TPCH_DATA_DIR_COORDINATOR:-}" ] || die "TPCH_DATA_DIR_COORDINATOR must be set"
     [ -n "${ACCIO_RESULTS_DIR:-}" ] || die "ACCIO_RESULTS_DIR must be set"
     case "$TPCH_DATA_DIR_DB1" in
@@ -186,6 +191,10 @@ validate_inputs() {
     case "$TPCH_DATA_DIR_DB2" in
         /*) ;;
         *) die "TPCH_DATA_DIR_DB2 must be an absolute path" ;;
+    esac
+    case "$TPCH_DATA_DIR_DB3" in
+        /*) ;;
+        *) die "TPCH_DATA_DIR_DB3 must be an absolute path" ;;
     esac
     case "$TPCH_DATA_DIR_COORDINATOR" in
         /*) ;;
@@ -267,26 +276,32 @@ fresh() {
     [ "$DEPLOY_MODE" = "compose" ] || \
         die "fresh is only available in Compose mode; Swarm volumes are node-local"
 
-    local postgres1_id postgres2_id postgres1_volume postgres2_volume
-    postgres1_id="$(compose ps -q postgres1)"
-    postgres2_id="$(compose ps -q postgres2)"
-    [ -n "$postgres1_id" ] && [ -n "$postgres2_id" ] || \
-        die "postgres containers are not present; run deploy once before fresh"
+    # Create any missing source container (for example postgres3 after upgrading
+    # an existing two-source deployment) so its actual Compose volume can be
+    # resolved before all source volumes are removed.
+    compose create postgres1 postgres2 postgres3 >/dev/null
 
-    postgres1_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres1_id")"
-    postgres2_volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres2_id")"
-    [ -n "$postgres1_volume" ] && [ -n "$postgres2_volume" ] || \
-        die "could not resolve the PostgreSQL data volumes"
-    [ "$postgres1_volume" != "$postgres2_volume" ] || \
-        die "both PostgreSQL services unexpectedly use the same data volume"
+    local service container_id volume seen=" "
+    local -a volumes=()
+    for service in postgres1 postgres2 postgres3; do
+        container_id="$(compose ps -q "$service")"
+        [ -n "$container_id" ] || \
+            die "$service container could not be created before fresh"
+        volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$container_id")"
+        [ -n "$volume" ] || die "could not resolve the PostgreSQL data volume for $service"
+        case "$seen" in
+            *" $volume "*) die "multiple PostgreSQL services unexpectedly use volume $volume" ;;
+            *) seen="${seen}${volume} "; volumes+=("$volume") ;;
+        esac
+    done
 
-    log "removing PostgreSQL data volumes: $postgres1_volume $postgres2_volume"
+    log "removing PostgreSQL data volumes: ${volumes[*]}"
     compose down
-    docker volume rm "$postgres1_volume" "$postgres2_volume"
-    if docker volume inspect "$postgres1_volume" >/dev/null 2>&1 || \
-       docker volume inspect "$postgres2_volume" >/dev/null 2>&1; then
-        die "a PostgreSQL data volume still exists after removal"
-    fi
+    docker volume rm "${volumes[@]}"
+    for volume in "${volumes[@]}"; do
+        docker volume inspect "$volume" >/dev/null 2>&1 && \
+            die "PostgreSQL data volume still exists after removal: $volume"
+    done
     deploy
 }
 

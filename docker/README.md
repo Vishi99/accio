@@ -1,13 +1,13 @@
-# Docker experiments: DuckDB coordinator + two PostgreSQL sources
+# Docker experiments: DuckDB coordinator + three PostgreSQL sources
 
-This deployment runs one Accio/DuckDB coordinator and exactly two PostgreSQL
+This deployment runs one Accio/DuckDB coordinator and three PostgreSQL
 data sources. It supports both:
 
 - Docker Compose on one machine, for development and smoke tests.
-- Docker Swarm on three machines, with each service pinned to a labeled node.
+- Docker Swarm on four machines, with each service pinned to a labeled node.
 
 The PostgreSQL containers load their assigned TPC-H `.tbl` files only when
-their data volumes are first created. The coordinator waits for both loads,
+their data volumes are first created. The coordinator waits for all source loads,
 checks that the physical table distribution matches the configuration, writes
 the Accio source configs, and runs the selected `tpch2_v*` workload.
 
@@ -15,7 +15,7 @@ the Accio source configs, and runs the selected `tpch2_v*` workload.
 
 | File | Purpose |
 | --- | --- |
-| `docker-compose.multinode.yml` | Three-service Compose/Swarm topology |
+| `docker-compose.multinode.yml` | Four-service Compose/Swarm topology |
 | `docker/experiment.env.example` | All experiment, TPC-H, resource, and cost settings |
 | `docker/coordinator/Dockerfile` | Accio, DuckDB, custom PostgreSQL scanner, and rewriter image |
 | `docker/postgres/Dockerfile` | PostgreSQL image with TPC-H loader and optional `netem` support |
@@ -33,13 +33,17 @@ the Accio source configs, and runs the selected `tpch2_v*` workload.
   | query planning and |          | assigned subset of TPC-H tables      |
   | local execution    |          +---------------------------------------+
   |                    |--------->| postgres2 (Accio schema name: db2)   |
+  |                    |          | assigned subset of TPC-H tables      |
+  |                    |          +---------------------------------------+
+  |                    |--------->| postgres3 (Accio schema name: db3)   |
   +--------------------+          | assigned subset of TPC-H tables      |
                                   +---------------------------------------+
 ```
 
 DuckDB is embedded in the coordinator process; it is not a network database
 service. PostgreSQL ports are not published to the host. Communication stays
-on the deployment network under the service names `postgres1` and `postgres2`.
+on the deployment network under the service names `postgres1`, `postgres2`,
+and `postgres3`.
 
 ## Prerequisites
 
@@ -49,7 +53,7 @@ on the deployment network under the service names `postgres1` and `postgres2`.
 - TPC-H `dbgen` output containing these files:
   `region.tbl`, `nation.tbl`, `supplier.tbl`, `customer.tbl`, `part.tbl`,
   `partsupp.tbl`, `orders.tbl`, and `lineitem.tbl`.
-- Enough free disk for two PostgreSQL volumes, the images, and coordinator
+- Enough free disk for three PostgreSQL volumes, the images, and coordinator
   results. The coordinator image is slow to build the first time because it
   compiles the custom DuckDB/PostgreSQL scanner and the Java rewriter.
 
@@ -87,7 +91,7 @@ The first positional argument is the scale and the optional second argument is
 the output directory. Existing `.tbl` files are overwritten by dbgen. The
 selected scale must match `TPCH_SCALE` in the experiment env file.
 
-## Local three-container quick start
+## Local four-container quick start
 
 Generate the data, then create the active config and use the absolute paths
 printed by the generator:
@@ -105,6 +109,7 @@ DEPLOY_MODE=compose
 NETWORK_DRIVER=bridge
 TPCH_DATA_DIR_DB1=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_DB2=/absolute/path/to/tpch-dbgen-output
+TPCH_DATA_DIR_DB3=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_COORDINATOR=/absolute/path/to/tpch-dbgen-output
 ACCIO_RESULTS_DIR=/absolute/path/to/accio-results
 ACCIO_EXPLAIN=true
@@ -139,14 +144,14 @@ Then validate, build, deploy, and follow the experiment:
 ./run_multinode_experiments.sh logs
 ```
 
-To discard both PostgreSQL databases and perform a guaranteed fresh Compose
+To discard all PostgreSQL databases and perform a guaranteed fresh Compose
 load, use:
 
 ```bash
 ./run_multinode_experiments.sh fresh
 ```
 
-`fresh` permanently removes the two PostgreSQL data volumes resolved from the
+`fresh` permanently removes the three PostgreSQL data volumes resolved from the
 running containers, verifies their removal, and redeploys. It does not modify
 `ACCIO_RESULTS_DIR` or the source `.tbl` files. It is intentionally not
 available in Swarm mode because those volumes reside on separate nodes.
@@ -174,9 +179,9 @@ ls -lt /absolute/path/to/accio-results
 less /absolute/path/to/accio-results/tpch-sf1-v1-all-TIMESTAMP.log
 ```
 
-## Three-host Docker Swarm setup
+## Four-host Docker Swarm setup
 
-The expected roles are one manager/coordinator host and two source hosts. A
+The expected roles are one manager/coordinator host and three source hosts. A
 manager may also be a worker, but each label should identify the intended
 machine. On the manager:
 
@@ -185,17 +190,18 @@ docker swarm init --advertise-addr MANAGER_IP
 docker swarm join-token worker
 ```
 
-Run the printed `docker swarm join ...` command on both source hosts. Back on
-the manager, obtain the node names and assign the three placement labels:
+Run the printed `docker swarm join ...` command on all source hosts. Back on
+the manager, obtain the node names and assign the four placement labels:
 
 ```bash
 docker node ls
 docker node update --label-add accio.role=coordinator COORDINATOR_NODE
 docker node update --label-add accio.role=postgres1 POSTGRES1_NODE
 docker node update --label-add accio.role=postgres2 POSTGRES2_NODE
+docker node update --label-add accio.role=postgres3 POSTGRES3_NODE
 ```
 
-Put the matching TPC-H files on each node that owns tables. All three bind
+Put the matching TPC-H files on each node that owns tables. All four bind
 directories must exist even when the coordinator owns no tables. The paths may
 differ; the env file supplies one bind path per node:
 
@@ -203,6 +209,7 @@ differ; the env file supplies one bind path per node:
 DEPLOY_MODE=swarm
 TPCH_DATA_DIR_DB1=/data/tpch/sf1
 TPCH_DATA_DIR_DB2=/mnt/benchmarks/tpch/sf1
+TPCH_DATA_DIR_DB3=/data/tpch/sf1
 TPCH_DATA_DIR_COORDINATOR=/data/tpch/sf1
 ACCIO_RESULTS_DIR=/data/accio-results
 ```
@@ -262,11 +269,11 @@ without copying by prefixing any wrapper command with
 the default physical table distribution and the corresponding
 `workload/tpch2_<placement>` SQL directory:
 
-| Placement | `db1` / `postgres1` | `db2` / `postgres2` | coordinator / DuckDB |
-| --- | --- | --- | --- |
-| `v0` | region, nation, supplier, customer, orders, lineitem | part, partsupp | none |
-| `v1` (default) | region, nation, supplier, customer, part, partsupp | orders, lineitem | none |
-| `v2` | part, partsupp, orders, lineitem | region, nation, supplier, customer | none |
+| Placement | `db1` / `postgres1` | `db2` / `postgres2` | `db3` / `postgres3` | coordinator / DuckDB |
+| --- | --- | --- | --- | --- |
+| `v0` | region, nation, supplier, customer, orders, lineitem | part, partsupp | none | none |
+| `v1` (default) | region, nation, supplier, customer, part, partsupp | orders, lineitem | none | none |
+| `v2` | part, partsupp, orders, lineitem | region, nation, supplier, customer | none | none |
 
 For a completely explicit two-source distribution, set both PostgreSQL lists.
 Every TPC-H table must occur exactly once across them:
@@ -274,12 +281,24 @@ Every TPC-H table must occur exactly once across them:
 ```dotenv
 TPCH_TABLES_DB1="region nation supplier customer part partsupp"
 TPCH_TABLES_DB2="orders lineitem"
+TPCH_TABLES_DB3=
+TPCH_TABLES_COORDINATOR=
+```
+
+To use all three PostgreSQL sources with the v2 workload, split the original
+v2 `db1` tables between `db1` and `db3`:
+
+```dotenv
+TPCH_PLACEMENT=v2
+TPCH_TABLES_DB1="part partsupp"
+TPCH_TABLES_DB2="region nation supplier customer"
+TPCH_TABLES_DB3="orders lineitem"
 TPCH_TABLES_COORDINATOR=
 ```
 
 Quote non-empty lists because the env file is also loaded as shell syntax.
 `WORKLOAD_DIR` can select another workload directory inside the coordinator
-image; its existing `db1.`/`db2.` table qualifiers are normalized to the
+image; its existing source qualifiers are normalized to the
 configured ownership before execution.
 
 The loader accepts `TPCH_TABLES_COORDINATOR`, but the current Accio `benefit`
@@ -310,9 +329,9 @@ coordinator and executes the resulting federated plan.
 - `PG_MAX_PARALLELISM` controls Accio's PostgreSQL query partitioner.
 - `DB_STATS_TARGET` is used while collecting optimizer statistics after load.
 - `BANDWIDTH=none` uses the real network. A value such as `1gbit` installs a
-  per-source `netem` egress limit. Two sources can therefore provide twice that
-  bandwidth in aggregate. The containers receive only `NET_ADMIN`, required
-  for this optional traffic control.
+  per-source `netem` egress limit. Three active sources can therefore provide
+  three times that bandwidth in aggregate. The containers receive only
+  `NET_ADMIN`, required for this optional traffic control.
 - `COST_JOIN`, `COST_AGG`, `COST_SORT`, and `COST_TRANSFER` populate each Accio
   data-source JSON config.
 
@@ -324,8 +343,8 @@ pattern.
 ## Changing scale or table placement
 
 PostgreSQL's official initialization hooks run only for an empty data directory.
-Consequently, changing `TPCH_SCALE`, `TPCH_PLACEMENT`, any of the three table
-lists, or the dbgen files requires deleting both PostgreSQL volumes before
+Consequently, changing `TPCH_SCALE`, `TPCH_PLACEMENT`, any table list, or the
+dbgen files requires deleting all three PostgreSQL volumes before
 redeploying.
 The coordinator checks stored metadata and fails instead of silently running a
 workload against stale placement.
@@ -336,13 +355,15 @@ regenerated:
 ```bash
 set -a; source docker/experiment.env; set +a
 ./run_multinode_experiments.sh down
-docker volume rm "${STACK_NAME}_postgres1-data" "${STACK_NAME}_postgres2-data"
+docker volume rm "${STACK_NAME}_postgres1-data" "${STACK_NAME}_postgres2-data" \
+  "${STACK_NAME}_postgres3-data"
 ./run_multinode_experiments.sh deploy
 ```
 
 For Swarm, remove the stack and then run the corresponding `docker volume rm`
 for `${STACK_NAME}_postgres1-data` on the postgres1 node and
-`${STACK_NAME}_postgres2-data` on the postgres2 node. Swarm local volumes are
+`${STACK_NAME}_postgres2-data` on the postgres2 node, and
+`${STACK_NAME}_postgres3-data` on the postgres3 node. Swarm local volumes are
 node-local and are deliberately not deleted by the wrapper.
 
 ## Existing single-host runner
@@ -378,11 +399,12 @@ coordinator. Follow PostgreSQL loading logs with:
 ```bash
 # Local Compose
 docker compose --env-file docker/experiment.env \
-  -f docker-compose.multinode.yml logs -f postgres1 postgres2
+  -f docker-compose.multinode.yml logs -f postgres1 postgres2 postgres3
 
 # Swarm
 docker service logs -f "${STACK_NAME}_postgres1"
 docker service logs -f "${STACK_NAME}_postgres2"
+docker service logs -f "${STACK_NAME}_postgres3"
 ```
 
 Result logs are available directly under `ACCIO_RESULTS_DIR`; transient DuckDB
@@ -411,5 +433,5 @@ database files are deleted and do not need to be collected.
   needed. If the platform forbids that capability, set `BANDWIDTH=none` and
   remove the `cap_add` block from the Compose file.
 - A long coordinator wait is normal while large `.tbl` files load. Follow both
-  source logs with `docker compose logs -f postgres1 postgres2` locally or
+  source logs with `docker compose logs -f postgres1 postgres2 postgres3` locally or
   `docker service logs -f ${STACK_NAME}_postgres1` in Swarm.

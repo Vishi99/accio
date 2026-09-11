@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wait for the two TPC-H sources, generate Accio config, and run DuckDB."""
+"""Wait for the TPC-H sources, generate Accio config, and run DuckDB."""
 
 from __future__ import annotations
 
@@ -28,18 +28,22 @@ ALL_TABLES = {
     "orders",
     "lineitem",
 }
+SOURCES = ("db1", "db2", "db3")
 DEFAULT_PLACEMENTS = {
     "v0": {
         "db1": {"region", "nation", "supplier", "customer", "orders", "lineitem"},
         "db2": {"part", "partsupp"},
+        "db3": set(),
     },
     "v1": {
         "db1": {"region", "nation", "supplier", "customer", "part", "partsupp"},
         "db2": {"orders", "lineitem"},
+        "db3": set(),
     },
     "v2": {
         "db1": {"part", "partsupp", "orders", "lineitem"},
         "db2": {"region", "nation", "supplier", "customer"},
+        "db3": set(),
     },
 }
 TPCH_COLUMNS = {
@@ -67,7 +71,7 @@ def configured_tables(placement: str) -> dict[str, set[str]]:
 
     coordinator_tables = set(os.environ.get("TPCH_TABLES_COORDINATOR", "").split())
     result: dict[str, set[str]] = {"coordinator": coordinator_tables}
-    for source in ("db1", "db2"):
+    for source in SOURCES:
         override = os.environ.get(f"TPCH_TABLES_{source.upper()}", "").split()
         result[source] = (
             set(override)
@@ -75,12 +79,12 @@ def configured_tables(placement: str) -> dict[str, set[str]]:
             else DEFAULT_PLACEMENTS[placement][source] - coordinator_tables
         )
 
-    all_assigned = result["db1"] | result["db2"] | result["coordinator"]
-    overlap = (
-        (result["db1"] & result["db2"])
-        | (result["db1"] & result["coordinator"])
-        | (result["db2"] & result["coordinator"])
-    )
+    all_assigned = set().union(*result.values())
+    overlap = {
+        table
+        for table in ALL_TABLES
+        if sum(table in assigned_tables for assigned_tables in result.values()) > 1
+    }
     unknown = all_assigned - ALL_TABLES
     missing = ALL_TABLES - all_assigned
     if overlap or unknown or missing:
@@ -331,6 +335,7 @@ def prepare_workload(
         for owner, assigned_tables in tables.items()
         for table in assigned_tables
     }
+    source_pattern = "|".join(re.escape(source) for source in SOURCES)
     query_files = sorted(source_dir.glob("q*.sql"))
     if not query_files:
         raise SystemExit(f"[accio-coordinator] no q*.sql files found in {source_dir}")
@@ -339,7 +344,7 @@ def prepare_workload(
         for table, owner in owners.items():
             target = table if owner == "coordinator" else f"{owner}.{table}"
             sql = re.sub(
-                rf"\bdb[12]\.{table}\b",
+                rf"\b(?:{source_pattern})\.{table}\b",
                 target,
                 sql,
                 flags=re.IGNORECASE,
@@ -352,10 +357,10 @@ def main() -> None:
     placement = env("TPCH_PLACEMENT", "v1")
     scale = env("TPCH_SCALE", "1")
     tables = configured_tables(placement)
-    configs = {source: source_config(source) for source in ("db1", "db2")}
+    configs = {source: source_config(source) for source in SOURCES}
     timeout = int(env("STARTUP_TIMEOUT_SECONDS", "7200"))
 
-    for source in ("db1", "db2"):
+    for source in SOURCES:
         wait_for_source(source, configs[source], tables[source], placement, scale, timeout)
 
     config_dir = Path(env("ACCIO_CONFIG_DIR", "/experiment/config"))
@@ -411,7 +416,7 @@ def main() -> None:
             command.extend(["--query", query])
         if os.environ.get("ACCIO_EXPLAIN", "false").lower() in {"1", "true", "yes"}:
             command.append("--explain")
-        command.extend(["db1", "db2"])
+        command.extend(SOURCES)
 
         print(f"[accio-coordinator] running: {shlex.join(command)}", flush=True)
         print(f"[accio-coordinator] result log: {log_path}", flush=True)

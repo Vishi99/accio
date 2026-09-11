@@ -23,6 +23,7 @@ x-postgres-common: &postgres-common
     TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
     TPCH_TABLES_DB1: ${TPCH_TABLES_DB1:-}
     TPCH_TABLES_DB2: ${TPCH_TABLES_DB2:-}
+    TPCH_TABLES_DB3: ${TPCH_TABLES_DB3:-}
     TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
     DB_STATS_TARGET: ${DB_STATS_TARGET:-100}
     BANDWIDTH: ${BANDWIDTH:-none}
@@ -84,6 +85,25 @@ services:
       restart_policy:
         condition: on-failure
 
+  postgres3:
+    <<: *postgres-common
+    hostname: postgres3
+    environment:
+      <<: *postgres-environment
+      TPCH_SOURCE_ID: db3
+    volumes:
+      - postgres3-data:/var/lib/postgresql/data
+      - type: bind
+        source: ${TPCH_DATA_DIR_DB3:?set TPCH_DATA_DIR_DB3 to an absolute path on the postgres3 node}
+        target: /tpch-data
+        read_only: true
+    deploy:
+      placement:
+        constraints:
+          - node.labels.accio.role == postgres3
+      restart_policy:
+        condition: on-failure
+
   coordinator:
     image: ${ACCIO_COORDINATOR_IMAGE:-accio-coordinator:latest}
     build:
@@ -99,6 +119,7 @@ services:
     depends_on:
       - postgres1
       - postgres2
+      - postgres3
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the experiment env file}
@@ -107,10 +128,13 @@ services:
       DB1_PORT: 5432
       DB2_HOST: postgres2
       DB2_PORT: 5432
+      DB3_HOST: postgres3
+      DB3_PORT: 5432
       TPCH_SCALE: ${TPCH_SCALE:-1}
       TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
       TPCH_TABLES_DB1: ${TPCH_TABLES_DB1:-}
       TPCH_TABLES_DB2: ${TPCH_TABLES_DB2:-}
+      TPCH_TABLES_DB3: ${TPCH_TABLES_DB3:-}
       TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
       TPCH_DATA_MOUNT: /tpch-data
       ACCIO_RUNS: ${ACCIO_RUNS:-1}
@@ -154,3 +178,4 @@ networks:
 volumes:
   postgres1-data:
   postgres2-data:
+  postgres3-data:
