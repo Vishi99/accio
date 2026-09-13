@@ -284,7 +284,7 @@ fresh() {
     local service container_id volume seen=" "
     local -a volumes=()
     for service in postgres1 postgres2 postgres3; do
-        container_id="$(compose ps -q "$service")"
+        container_id="$(compose ps --all --quiet "$service")"
         [ -n "$container_id" ] || \
             die "$service container could not be created before fresh"
         volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$container_id")"
