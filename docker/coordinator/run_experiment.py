@@ -28,22 +28,25 @@ ALL_TABLES = {
     "orders",
     "lineitem",
 }
-SOURCES = ("db1", "db2", "db3")
+DEFAULT_SOURCES = ("db1", "db2", "db3", "db4")
 DEFAULT_PLACEMENTS = {
     "v0": {
         "db1": {"region", "nation", "supplier", "customer", "orders", "lineitem"},
         "db2": {"part", "partsupp"},
         "db3": set(),
+        "db4": set(),
     },
     "v1": {
         "db1": {"region", "nation", "supplier", "customer", "part", "partsupp"},
         "db2": {"orders", "lineitem"},
         "db3": set(),
+        "db4": set(),
     },
     "v2": {
         "db1": {"part", "partsupp", "orders", "lineitem"},
         "db2": {"region", "nation", "supplier", "customer"},
         "db3": set(),
+        "db4": set(),
     },
 }
 TPCH_COLUMNS = {
@@ -65,18 +68,47 @@ def env(name: str, default: str | None = None) -> str:
     return value.strip()
 
 
-def configured_tables(placement: str) -> dict[str, set[str]]:
+def first_env(*names: str, default: str | None = None) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    if default is not None and default.strip():
+        return default.strip()
+    raise SystemExit(
+        f"[accio-coordinator] set one of these environment variables: {', '.join(names)}"
+    )
+
+
+def configured_sources() -> tuple[str, ...]:
+    sources = tuple(os.environ.get("ACCIO_SOURCES", " ".join(DEFAULT_SOURCES)).split())
+    if not sources:
+        raise SystemExit("[accio-coordinator] ACCIO_SOURCES must contain at least one source")
+    if len(set(sources)) != len(sources):
+        raise SystemExit("[accio-coordinator] ACCIO_SOURCES contains duplicates")
+    invalid = [source for source in sources if not re.fullmatch(r"[a-z][a-z0-9_]*", source)]
+    if "coordinator" in sources:
+        invalid.append("coordinator (reserved)")
+    if invalid:
+        raise SystemExit(
+            "[accio-coordinator] source names must be lowercase identifiers; "
+            f"invalid: {invalid}"
+        )
+    return sources
+
+
+def configured_tables(placement: str, sources: tuple[str, ...]) -> dict[str, set[str]]:
     if placement not in DEFAULT_PLACEMENTS:
         raise SystemExit("[accio-coordinator] TPCH_PLACEMENT must be v0, v1, or v2")
 
     coordinator_tables = set(os.environ.get("TPCH_TABLES_COORDINATOR", "").split())
     result: dict[str, set[str]] = {"coordinator": coordinator_tables}
-    for source in SOURCES:
+    for source in sources:
         override = os.environ.get(f"TPCH_TABLES_{source.upper()}", "").split()
         result[source] = (
             set(override)
             if override
-            else DEFAULT_PLACEMENTS[placement][source] - coordinator_tables
+            else DEFAULT_PLACEMENTS[placement].get(source, set()) - coordinator_tables
         )
 
     all_assigned = set().union(*result.values())
@@ -96,31 +128,88 @@ def configured_tables(placement: str) -> dict[str, set[str]]:
 
 
 def source_config(source: str) -> dict[str, object]:
-    host = env(f"{source.upper()}_HOST", f"postgres{source[-1]}")
-    port = int(env(f"{source.upper()}_PORT", "5432"))
-    user = env("POSTGRES_USER", "postgres")
-    password = env("POSTGRES_PASSWORD")
-    database = env("POSTGRES_DB", f"tpch{env('TPCH_SCALE', '1')}")
-    max_parallelism = int(env("PG_MAX_PARALLELISM", "8"))
-
-    return {
-        "type": "POSTGRES",
-        "driver": "org.postgresql.Driver",
-        "url": f"jdbc:postgresql://{host}:{port}/{database}",
-        "username": user,
-        "password": password,
-        "costParams": {
-            "join": float(env("COST_JOIN", "2.0")),
-            "agg": float(env("COST_AGG", "2.0")),
-            "sort": float(env("COST_SORT", "2.0")),
-            "trans": float(env("COST_TRANSFER", "10.0")),
-        },
-        "cardEstType": "postgres",
-        "partitionType": "postgres",
-        "partition": {"max_parallelism": max_parallelism},
-        "dialect": "postgres",
-        "disableOps": [],
+    prefix = source.upper()
+    source_type = env(f"{prefix}_TYPE", "POSTGRES").upper()
+    cost_params = {
+        "join": float(env("COST_JOIN", "2.0")),
+        "agg": float(env("COST_AGG", "2.0")),
+        "sort": float(env("COST_SORT", "2.0")),
+        "trans": float(env("COST_TRANSFER", "10.0")),
     }
+    if source_type == "POSTGRES":
+        host = env(f"{prefix}_HOST", f"postgres{source[-1]}")
+        port = int(env(f"{prefix}_PORT", "5432"))
+        database = first_env(
+            f"{prefix}_DATABASE",
+            "POSTGRES_DB",
+            default=f"tpch{env('TPCH_SCALE', '1')}",
+        )
+        return {
+            "type": "POSTGRES",
+            "driver": "org.postgresql.Driver",
+            "url": os.environ.get(
+                f"{prefix}_JDBC_URL",
+                f"jdbc:postgresql://{host}:{port}/{database}",
+            ),
+            "username": first_env(f"{prefix}_USERNAME", "POSTGRES_USER", default="postgres"),
+            "password": first_env(f"{prefix}_PASSWORD", "POSTGRES_PASSWORD"),
+            "costParams": cost_params,
+            "cardEstType": "postgres",
+            "partitionType": "postgres",
+            "partition": {"max_parallelism": int(env("PG_MAX_PARALLELISM", "8"))},
+            "dialect": "postgres",
+            "disableOps": [],
+        }
+    if source_type in {"DUCKDB", "QUACK"}:
+        host = env(f"{prefix}_HOST", f"duckdb{source[-1]}")
+        port = int(env(f"{prefix}_PORT", "9494"))
+        token = first_env(f"{prefix}_TOKEN", "QUACK_TOKEN")
+        return {
+            "type": "QUACK",
+            "driver": "com.gizmodata.quack.jdbc.sql.QuackDriver",
+            "url": os.environ.get(
+                f"{prefix}_JDBC_URL",
+                f"jdbc:quack://{host}:{port}",
+            ),
+            "username": "",
+            "password": token,
+            "costParams": cost_params,
+            "cardEstType": "duckdb",
+            "dialect": "postgres",
+            "quackDisableSsl": env(f"{prefix}_DISABLE_SSL", "true").lower()
+            in {"1", "true", "yes"},
+            "disableOps": [],
+        }
+    if source_type == "DATAFUSION":
+        host = env(f"{prefix}_HOST", f"datafusion{source[-1]}")
+        port = int(env(f"{prefix}_PORT", "5432"))
+        database = env(f"{prefix}_DATABASE", "postgres")
+        return {
+            # DuckDB executes remote fragments through its PostgreSQL connector.
+            # accioSourceType preserves the real engine identity for readiness.
+            "type": "POSTGRES",
+            "accioSourceType": "DATAFUSION",
+            "driver": "org.postgresql.Driver",
+            "url": os.environ.get(
+                f"{prefix}_JDBC_URL",
+                f"jdbc:postgresql://{host}:{port}/{database}",
+            ),
+            "username": env(f"{prefix}_USERNAME", "postgres"),
+            # The development PGWire server accepts any credentials. A
+            # non-empty placeholder keeps PostgreSQL URI parsers happy.
+            "password": os.environ.get(f"{prefix}_PASSWORD", "unused"),
+            "costParams": cost_params,
+            # DataFusion does not expose meaningful PostgreSQL reltuples/
+            # pg_stats or CTID. Unknown values select Accio's generic paths.
+            "cardEstType": "default",
+            "partitionType": "default",
+            "dialect": "datafusion",
+            "disableOps": [],
+        }
+    raise SystemExit(
+        f"[accio-coordinator] unsupported {prefix}_TYPE={source_type}; "
+        "use POSTGRES, DUCKDB, QUACK, or DATAFUSION"
+    )
 
 
 def connection_kwargs(config: dict[str, object]) -> dict[str, object]:
@@ -136,6 +225,121 @@ def connection_kwargs(config: dict[str, object]) -> dict[str, object]:
         "password": config["password"],
         "connect_timeout": 5,
     }
+
+
+def postgres_source_state(
+    config: dict[str, object],
+) -> tuple[bool, tuple[object, ...] | None, set[str]]:
+    with psycopg2.connect(**connection_kwargs(config)) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass('public.accio_dataset_metadata')")
+            metadata_table = cursor.fetchone()[0]
+            metadata = None
+            if metadata_table is not None:
+                cursor.execute(
+                    """
+                    SELECT placement, source_id, table_list, scale
+                    FROM accio_dataset_metadata
+                    ORDER BY loaded_at DESC
+                    LIMIT 1
+                    """
+                )
+                metadata = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name <> 'accio_dataset_metadata'
+                """
+            )
+            actual_tables = {row[0] for row in cursor.fetchall()}
+    return metadata_table is not None, metadata, actual_tables
+
+
+def quack_query(
+    connection: duckdb.DuckDBPyConnection,
+    config: dict[str, object],
+    query: str,
+) -> list[tuple[object, ...]]:
+    uri = str(config["url"]).removeprefix("jdbc:")
+    disable_ssl = "true" if config.get("quackDisableSsl", True) else "false"
+    uri_sql = uri.replace("'", "''")
+    query_sql = query.replace("'", "''")
+    token_sql = str(config["password"]).replace("'", "''")
+    return connection.execute(
+        "SELECT * FROM quack_query("
+        f"'{uri_sql}', '{query_sql}', token = '{token_sql}', "
+        f"disable_ssl = {disable_ssl})"
+    ).fetchall()
+
+
+def quack_source_state(
+    config: dict[str, object],
+) -> tuple[bool, tuple[object, ...] | None, set[str]]:
+    with duckdb.connect(":memory:") as connection:
+        connection.execute("LOAD quack")
+        metadata_table = bool(
+            quack_query(
+                connection,
+                config,
+                """
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'main'
+                  AND table_name = 'accio_dataset_metadata'
+                LIMIT 1
+                """,
+            )
+        )
+        metadata = None
+        if metadata_table:
+            rows = quack_query(
+                connection,
+                config,
+                """
+                SELECT placement, source_id, table_list, scale
+                FROM accio_dataset_metadata
+                ORDER BY loaded_at DESC
+                LIMIT 1
+                """,
+            )
+            metadata = rows[0] if rows else None
+        actual_tables = {
+            str(row[0])
+            for row in quack_query(
+                connection,
+                config,
+                """
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'main'
+                  AND table_name <> 'accio_dataset_metadata'
+                """,
+            )
+        }
+    return metadata_table, metadata, actual_tables
+
+
+def datafusion_source_state(
+    config: dict[str, object], expected_tables: set[str]
+) -> tuple[bool, tuple[object, ...] | None, set[str]]:
+    """Probe assigned tables without relying on PostgreSQL system catalogs."""
+    with psycopg2.connect(**connection_kwargs(config)) as connection:
+        with connection.cursor() as cursor:
+            for table in sorted(expected_tables):
+                if table not in ALL_TABLES:
+                    raise ValueError(f"invalid TPC-H table name: {table}")
+                cursor.execute(f'SELECT * FROM "{table}" LIMIT 0')
+    return False, None, set(expected_tables)
+
+
+def source_state(
+    config: dict[str, object], expected_tables: set[str]
+) -> tuple[bool, tuple[object, ...] | None, set[str]]:
+    if str(config.get("accioSourceType", "")).upper() == "DATAFUSION":
+        return datafusion_source_state(config, expected_tables)
+    if str(config["type"]).upper() == "QUACK":
+        return quack_source_state(config)
+    return postgres_source_state(config)
 
 
 def wait_for_source(
@@ -158,40 +362,19 @@ def wait_for_source(
     )
     while time.monotonic() < deadline:
         try:
-            with psycopg2.connect(**connection_kwargs(config)) as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT to_regclass('public.accio_dataset_metadata')"
-                    )
-                    metadata_table = cursor.fetchone()[0]
-                    metadata = None
-                    if metadata_table is not None:
-                        cursor.execute(
-                            """
-                            SELECT placement, source_id, table_list, scale
-                            FROM accio_dataset_metadata
-                            ORDER BY loaded_at DESC
-                            LIMIT 1
-                            """
-                        )
-                        metadata = cursor.fetchone()
-                    cursor.execute(
-                        """
-                        SELECT table_name
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                          AND table_name <> 'accio_dataset_metadata'
-                        """
-                    )
-                    actual_tables = {row[0] for row in cursor.fetchall()}
+            metadata_table, metadata, actual_tables = source_state(config, expected_tables)
         except Exception as error:  # readiness failures are retried until the deadline
             error_text = str(error)
             sqlstate = getattr(error, "pgcode", None) or getattr(
                 getattr(error, "diag", None), "sqlstate", None
             )
-            if sqlstate == "3D000" or re.search(
+            actual_source_type = str(
+                config.get("accioSourceType", config["type"])
+            ).upper()
+            database_absent = sqlstate == "3D000" or re.search(
                 r'database "[^"]+" does not exist', error_text, re.IGNORECASE
-            ):
+            )
+            if actual_source_type == "POSTGRES" and database_absent:
                 raise SystemExit(
                     f"[accio-coordinator] configured database is absent on {source}; "
                     "reset the PostgreSQL volume after changing TPCH_SCALE"
@@ -209,15 +392,23 @@ def wait_for_source(
             time.sleep(5)
             continue
 
+        if str(config.get("accioSourceType", "")).upper() == "DATAFUSION":
+            print(
+                f"[accio-coordinator] {source} is ready with "
+                f"{sorted(actual_tables)}",
+                flush=True,
+            )
+            return
+
         if metadata is None:
             now = time.monotonic()
-            if metadata_table is not None:
+            if metadata_table:
                 if metadata_empty_since is None:
                     metadata_empty_since = now
                 elif now - metadata_empty_since >= 15:
                     raise SystemExit(
                         f"[accio-coordinator] {source} has an empty "
-                        "accio_dataset_metadata table; PostgreSQL initialization "
+                        "accio_dataset_metadata table; source initialization "
                         "was interrupted or failed. Inspect the source logs, then "
                         "reset its data volume"
                     )
@@ -239,13 +430,13 @@ def wait_for_source(
             raise SystemExit(
                 "[accio-coordinator] stale dataset metadata in "
                 f"{source}: got {actual_placement}/{actual_source}/sf{actual_scale}, "
-                f"expected {placement}/{source}/sf{scale}; reset the PostgreSQL volume"
+                f"expected {placement}/{source}/sf{scale}; reset the source data volume"
             )
         if actual_tables != expected_tables:
             raise SystemExit(
                 f"[accio-coordinator] stale table placement in {source}: "
                 f"got {sorted(actual_tables)}, expected {sorted(expected_tables)}; "
-                "reset the PostgreSQL volume"
+                "reset the source data volume"
             )
         print(f"[accio-coordinator] {source} is ready with {sorted(actual_tables)}", flush=True)
         return
@@ -324,6 +515,7 @@ def prepare_workload(
     source_dir: Path,
     output_dir: Path,
     tables: dict[str, set[str]],
+    sources: tuple[str, ...],
 ) -> Path:
     if not source_dir.is_dir():
         raise SystemExit(f"[accio-coordinator] workload directory does not exist: {source_dir}")
@@ -335,7 +527,7 @@ def prepare_workload(
         for owner, assigned_tables in tables.items()
         for table in assigned_tables
     }
-    source_pattern = "|".join(re.escape(source) for source in SOURCES)
+    source_pattern = "|".join(re.escape(source) for source in sources)
     query_files = sorted(source_dir.glob("q*.sql"))
     if not query_files:
         raise SystemExit(f"[accio-coordinator] no q*.sql files found in {source_dir}")
@@ -356,11 +548,12 @@ def prepare_workload(
 def main() -> None:
     placement = env("TPCH_PLACEMENT", "v1")
     scale = env("TPCH_SCALE", "1")
-    tables = configured_tables(placement)
-    configs = {source: source_config(source) for source in SOURCES}
+    sources = configured_sources()
+    tables = configured_tables(placement, sources)
+    configs = {source: source_config(source) for source in sources}
     timeout = int(env("STARTUP_TIMEOUT_SECONDS", "7200"))
 
-    for source in SOURCES:
+    for source in sources:
         wait_for_source(source, configs[source], tables[source], placement, scale, timeout)
 
     config_dir = Path(env("ACCIO_CONFIG_DIR", "/experiment/config"))
@@ -374,6 +567,7 @@ def main() -> None:
         source_workload,
         Path("/experiment/workload"),
         tables,
+        sources,
     )
 
     query = os.environ.get("ACCIO_QUERY", "").strip()
@@ -416,7 +610,7 @@ def main() -> None:
             command.extend(["--query", query])
         if os.environ.get("ACCIO_EXPLAIN", "false").lower() in {"1", "true", "yes"}:
             command.append("--explain")
-        command.extend(SOURCES)
+        command.extend(sources)
 
         print(f"[accio-coordinator] running: {shlex.join(command)}", flush=True)
         print(f"[accio-coordinator] result log: {log_path}", flush=True)

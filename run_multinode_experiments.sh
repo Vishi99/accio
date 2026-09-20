@@ -8,7 +8,7 @@ ENV_FILE="${ACCIO_ENV_FILE:-${SCRIPT_DIR}/docker/experiment.env}"
 
 usage() {
     cat <<'EOF'
-Deploy DuckDB/Accio with three PostgreSQL TPC-H sources.
+Deploy a DuckDB/Accio coordinator with environment-configured TPC-H sources.
 
 Usage:
   cp docker/experiment.env.example docker/experiment.env
@@ -23,17 +23,17 @@ Usage:
   ./run_multinode_experiments.sh down
 
 Select another file with ACCIO_ENV_FILE=/path/to/file. Set DEPLOY_MODE=compose
-for one Docker host or DEPLOY_MODE=swarm for four labeled Swarm nodes.
+for one Docker host or DEPLOY_MODE=swarm for five labeled Swarm nodes.
 
 Commands:
   config  Render and validate the fully interpolated Compose/Stack definition.
   build   Build locally, or build and push registry images in Swarm mode.
   deploy  Start the sources and submit the one-shot coordinator experiment.
-  fresh   Compose only: delete all PostgreSQL volumes, then deploy from scratch.
+  fresh   Compose only: delete all configured source volumes, then deploy.
   logs    Follow the coordinator output.
-  rerun   Submit the coordinator experiment again without reloading PostgreSQL.
+  rerun   Submit the coordinator experiment again without reloading sources.
   status  Show container/service state.
-  down    Remove the deployment, retaining PostgreSQL volumes and host result logs.
+  down    Remove the deployment, retaining source volumes and host result logs.
 EOF
 }
 
@@ -61,7 +61,8 @@ load_environment() {
         swarm) NETWORK_DRIVER=overlay ;;
         *) die "DEPLOY_MODE must be compose or swarm (got: $DEPLOY_MODE)" ;;
     esac
-    export DEPLOY_MODE STACK_NAME NETWORK_DRIVER
+    ACCIO_ENV_FILE="$ENV_FILE"
+    export DEPLOY_MODE STACK_NAME NETWORK_DRIVER ACCIO_ENV_FILE
 }
 
 require_docker() {
@@ -73,14 +74,45 @@ compose() {
     docker compose --env-file "$ENV_FILE" --file "$COMPOSE_FILE" --project-name "$STACK_NAME" "$@"
 }
 
+sources() {
+    printf '%s\n' ${ACCIO_SOURCES:-db1 db2 db3 db4}
+}
+
+source_variable() {
+    local prefix variable
+    prefix="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+    variable="${prefix}_$2"
+    printf '%s\n' "${!variable:-}"
+}
+
+source_type() {
+    local value
+    value="$(source_variable "$1" TYPE)"
+    printf '%s\n' "${value:-POSTGRES}" | tr '[:lower:]' '[:upper:]'
+}
+
+source_service() {
+    local source="$1" configured suffix prefix
+    configured="$(source_variable "$source" SERVICE)"
+    if [ -n "$configured" ]; then
+        printf '%s\n' "$configured"
+        return
+    fi
+    suffix="${source#db}"
+    prefix="$(printf '%s' "$source" | tr '[:lower:]' '[:upper:]')"
+    case "$(source_type "$source")" in
+        POSTGRES) printf 'postgres%s\n' "$suffix" ;;
+        DUCKDB|QUACK) printf 'duckdb%s\n' "$suffix" ;;
+        DATAFUSION) printf 'datafusion%s\n' "$suffix" ;;
+        *) die "Set ${prefix}_SERVICE for custom source type $(source_type "$source")" ;;
+    esac
+}
+
 validate_table_distribution() {
-    local db1_tables="${TPCH_TABLES_DB1:-}"
-    local db2_tables="${TPCH_TABLES_DB2:-}"
-    local db3_tables="${TPCH_TABLES_DB3:-}"
     local coordinator_tables="${TPCH_TABLES_COORDINATOR:-}"
 
     local seen=" "
-    local table
+    local source table tables
     for table in $coordinator_tables; do
         case " region nation supplier customer part partsupp orders lineitem " in
             *" $table "*) ;;
@@ -92,21 +124,18 @@ validate_table_distribution() {
         esac
     done
 
-    if [ -z "$db1_tables" ] && [ -z "$db2_tables" ] && [ -z "$db3_tables" ]; then
-        return
-    fi
-    [ -n "$db1_tables" ] && [ -n "$db2_tables" ] || \
-        die "Set TPCH_TABLES_DB1 and TPCH_TABLES_DB2 whenever any source override is used"
-
-    for table in $db1_tables $db2_tables $db3_tables; do
-        case " region nation supplier customer part partsupp orders lineitem " in
-            *" $table "*) ;;
-            *) die "Unknown table in custom distribution: $table" ;;
-        esac
-        case "$seen" in
-            *" $table "*) die "Table occurs more than once in custom distribution: $table" ;;
-            *) seen="${seen}${table} " ;;
-        esac
+    for source in $(sources); do
+        tables="$(configured_tables_for "$source")"
+        for table in $tables; do
+            case " region nation supplier customer part partsupp orders lineitem " in
+                *" $table "*) ;;
+                *) die "Unknown table in custom distribution: $table" ;;
+            esac
+            case "$seen" in
+                *" $table "*) die "Table occurs more than once in custom distribution: $table" ;;
+                *) seen="${seen}${table} " ;;
+            esac
+        done
     done
     for table in region nation supplier customer part partsupp orders lineitem; do
         case "$seen" in
@@ -124,22 +153,21 @@ default_source_tables() {
         v1:db2) printf '%s\n' "orders lineitem" ;;
         v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
         v2:db2) printf '%s\n' "region nation supplier customer" ;;
-        v0:db3|v1:db3|v2:db3) printf '%s\n' "" ;;
-        *) die "cannot resolve table distribution for ${TPCH_PLACEMENT}:${1}" ;;
+        *) printf '%s\n' "" ;;
     esac
 }
 
 configured_tables_for() {
     local target="$1"
-    local override=""
+    local override="" variable prefix
     local table
-    case "$target" in
-        db1) override="${TPCH_TABLES_DB1:-}" ;;
-        db2) override="${TPCH_TABLES_DB2:-}" ;;
-        db3) override="${TPCH_TABLES_DB3:-}" ;;
-        coordinator) printf '%s\n' "${TPCH_TABLES_COORDINATOR:-}"; return ;;
-        *) die "unknown table target: $target" ;;
-    esac
+    if [ "$target" = coordinator ]; then
+        printf '%s\n' "${TPCH_TABLES_COORDINATOR:-}"
+        return
+    fi
+    prefix="$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')"
+    variable="TPCH_TABLES_${prefix}"
+    override="${!variable:-}"
     if [ -n "$override" ]; then
         printf '%s\n' "$override"
         return
@@ -153,14 +181,15 @@ configured_tables_for() {
 }
 
 validate_compose_data_files() {
-    local target data_dir table
-    for target in db1 db2 db3 coordinator; do
-        case "$target" in
-            db1) data_dir="$TPCH_DATA_DIR_DB1" ;;
-            db2) data_dir="$TPCH_DATA_DIR_DB2" ;;
-            db3) data_dir="$TPCH_DATA_DIR_DB3" ;;
-            coordinator) data_dir="$TPCH_DATA_DIR_COORDINATOR" ;;
-        esac
+    local target data_dir table variable prefix
+    for target in $(sources) coordinator; do
+        if [ "$target" = coordinator ]; then
+            data_dir="$TPCH_DATA_DIR_COORDINATOR"
+        else
+            prefix="$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')"
+            variable="TPCH_DATA_DIR_${prefix}"
+            data_dir="${!variable:-}"
+        fi
         [ -d "$data_dir" ] || die "TPC-H data directory for $target does not exist: $data_dir"
         for table in $(configured_tables_for "$target"); do
             [ -s "$data_dir/$table.tbl" ] || \
@@ -178,24 +207,34 @@ validate_inputs() {
         1|10|50) ;;
         *) die "TPCH_SCALE must be 1, 10, or 50" ;;
     esac
-    [ -n "${POSTGRES_PASSWORD:-}" ] || die "POSTGRES_PASSWORD must not be empty"
-    [ -n "${TPCH_DATA_DIR_DB1:-}" ] || die "TPCH_DATA_DIR_DB1 must be set"
-    [ -n "${TPCH_DATA_DIR_DB2:-}" ] || die "TPCH_DATA_DIR_DB2 must be set"
-    [ -n "${TPCH_DATA_DIR_DB3:-}" ] || die "TPCH_DATA_DIR_DB3 must be set"
     [ -n "${TPCH_DATA_DIR_COORDINATOR:-}" ] || die "TPCH_DATA_DIR_COORDINATOR must be set"
     [ -n "${ACCIO_RESULTS_DIR:-}" ] || die "ACCIO_RESULTS_DIR must be set"
-    case "$TPCH_DATA_DIR_DB1" in
-        /*) ;;
-        *) die "TPCH_DATA_DIR_DB1 must be an absolute path" ;;
-    esac
-    case "$TPCH_DATA_DIR_DB2" in
-        /*) ;;
-        *) die "TPCH_DATA_DIR_DB2 must be an absolute path" ;;
-    esac
-    case "$TPCH_DATA_DIR_DB3" in
-        /*) ;;
-        *) die "TPCH_DATA_DIR_DB3 must be an absolute path" ;;
-    esac
+    local source type data_dir variable prefix token seen_sources=" "
+    for source in $(sources); do
+        [[ "$source" =~ ^[a-z][a-z0-9_]*$ ]] || \
+            die "ACCIO_SOURCES entries must be lowercase identifiers (got: $source)"
+        [ "$source" != coordinator ] || die "coordinator is a reserved source name"
+        case "$seen_sources" in
+            *" $source "*) die "ACCIO_SOURCES contains duplicate source $source" ;;
+            *) seen_sources="${seen_sources}${source} " ;;
+        esac
+        type="$(source_type "$source")"
+        prefix="$(printf '%s' "$source" | tr '[:lower:]' '[:upper:]')"
+        variable="TPCH_DATA_DIR_${prefix}"
+        data_dir="${!variable:-}"
+        [ -n "$data_dir" ] || die "$variable must be set"
+        case "$data_dir" in /*) ;; *) die "$variable must be an absolute path" ;; esac
+        case "$type" in
+            POSTGRES) [ -n "$(source_variable "$source" PASSWORD)${POSTGRES_PASSWORD:-}" ] || die "Set ${prefix}_PASSWORD or POSTGRES_PASSWORD" ;;
+            DUCKDB|QUACK)
+                token="$(source_variable "$source" TOKEN)${QUACK_TOKEN:-}"
+                [ -n "$token" ] || die "Set ${prefix}_TOKEN or QUACK_TOKEN"
+                [ "${#token}" -ge 4 ] || die "${prefix}_TOKEN/QUACK_TOKEN must have at least four characters"
+                ;;
+            DATAFUSION) ;;
+            *) die "${prefix}_TYPE must be POSTGRES, DUCKDB, QUACK, or DATAFUSION (got: $type)" ;;
+        esac
+    done
     case "$TPCH_DATA_DIR_COORDINATOR" in
         /*) ;;
         *) die "TPCH_DATA_DIR_COORDINATOR must be an absolute path" ;;
@@ -218,6 +257,14 @@ validate_inputs() {
         case "${ACCIO_POSTGRES_IMAGE:-}" in
             */*) ;;
             *) die "Use a registry-qualified ACCIO_POSTGRES_IMAGE in Swarm mode" ;;
+        esac
+        case "${ACCIO_DUCKDB_IMAGE:-}" in
+            */*) ;;
+            *) die "Use a registry-qualified ACCIO_DUCKDB_IMAGE in Swarm mode" ;;
+        esac
+        case "${ACCIO_DATAFUSION_IMAGE:-}" in
+            */*) ;;
+            *) die "Use a registry-qualified ACCIO_DATAFUSION_IMAGE in Swarm mode" ;;
         esac
     fi
 }
@@ -247,13 +294,26 @@ build_images() {
         --file "$SCRIPT_DIR/docker/postgres/Dockerfile" \
         "$SCRIPT_DIR"
     docker build \
+        --tag "$ACCIO_DUCKDB_IMAGE" \
+        --build-arg "DUCKDB_VERSION=${DUCKDB_VERSION:-1.5.3}" \
+        --file "$SCRIPT_DIR/docker/duckdb/Dockerfile" \
+        "$SCRIPT_DIR"
+    docker build \
+        --tag "$ACCIO_DATAFUSION_IMAGE" \
+        --build-arg "DATAFUSION_POSTGRES_VERSION=${DATAFUSION_POSTGRES_VERSION:-0.17.0}" \
+        --file "$SCRIPT_DIR/docker/datafusion/Dockerfile" \
+        "$SCRIPT_DIR"
+    docker build \
         --tag "$ACCIO_COORDINATOR_IMAGE" \
+        --build-arg "DUCKDB_VERSION=${DUCKDB_VERSION:-1.5.3}" \
         --build-arg "POSTGRESSCANNER_REPOSITORY=${POSTGRESSCANNER_REPOSITORY:-https://github.com/wangxiaoying/postgresscanner.git}" \
         --build-arg "POSTGRESSCANNER_REF=${POSTGRESSCANNER_REF:-prallel_query}" \
         --build-arg "POSTGRESSCANNER_BUILD_JOBS=${POSTGRESSCANNER_BUILD_JOBS:-4}" \
-        --file "$SCRIPT_DIR/docker/coordinator/Dockerfile" \
+        --file "$SCRIPT_DIR/${ACCIO_COORDINATOR_DOCKERFILE:-docker/coordinator/Dockerfile}" \
         "$SCRIPT_DIR"
     docker push "$ACCIO_POSTGRES_IMAGE"
+    docker push "$ACCIO_DUCKDB_IMAGE"
+    docker push "$ACCIO_DATAFUSION_IMAGE"
     docker push "$ACCIO_COORDINATOR_IMAGE"
 }
 
@@ -276,31 +336,42 @@ fresh() {
     [ "$DEPLOY_MODE" = "compose" ] || \
         die "fresh is only available in Compose mode; Swarm volumes are node-local"
 
-    # Create any missing source container (for example postgres3 after upgrading
-    # an existing two-source deployment) so its actual Compose volume can be
-    # resolved before all source volumes are removed.
-    compose create postgres1 postgres2 postgres3 >/dev/null
+    local source service destination
+    local -a services=()
+    for source in $(sources); do
+        services+=("$(source_service "$source")")
+    done
+    compose create "${services[@]}" >/dev/null
 
-    local service container_id volume seen=" "
+    local container_id volume seen=" "
     local -a volumes=()
-    for service in postgres1 postgres2 postgres3; do
+    for source in $(sources); do
+        service="$(source_service "$source")"
         container_id="$(compose ps --all --quiet "$service")"
         [ -n "$container_id" ] || \
             die "$service container could not be created before fresh"
-        volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$container_id")"
-        [ -n "$volume" ] || die "could not resolve the PostgreSQL data volume for $service"
+        case "$(source_type "$source")" in
+            POSTGRES) destination=/var/lib/postgresql/data ;;
+            DUCKDB|QUACK) destination=/var/lib/duckdb ;;
+            DATAFUSION) continue ;;
+            *) die "fresh does not know the volume location for $source" ;;
+        esac
+        volume="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.Name}}{{end}}{{end}}" "$container_id")"
+        [ -n "$volume" ] || die "could not resolve the data volume for $service"
         case "$seen" in
-            *" $volume "*) die "multiple PostgreSQL services unexpectedly use volume $volume" ;;
+            *" $volume "*) die "multiple sources unexpectedly use volume $volume" ;;
             *) seen="${seen}${volume} "; volumes+=("$volume") ;;
         esac
     done
 
-    log "removing PostgreSQL data volumes: ${volumes[*]}"
+    log "removing persistent source data volumes: ${volumes[*]}"
     compose down
-    docker volume rm "${volumes[@]}"
+    if [ "${#volumes[@]}" -gt 0 ]; then
+        docker volume rm "${volumes[@]}"
+    fi
     for volume in "${volumes[@]}"; do
         docker volume inspect "$volume" >/dev/null 2>&1 && \
-            die "PostgreSQL data volume still exists after removal: $volume"
+            die "source data volume still exists after removal: $volume"
     done
     deploy
 }
@@ -343,7 +414,7 @@ down() {
     else
         docker stack rm "$STACK_NAME"
     fi
-    log "deployment removed; PostgreSQL volumes and host result logs were retained"
+    log "deployment removed; source volumes and host result logs were retained"
 }
 
 main() {

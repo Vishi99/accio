@@ -124,6 +124,53 @@ git pull --recurse-submodules
 * Add `duckdb = { path = "${YOUR_PATH}/postgresscanner/duckdb/tools/pythonpkg", develop = true }` to `pyproject.toml` and install the local version by `poetry lock && poetry install`.
 * Add `DUCK_PG_EXTENSION=${YOUR_PATH}/postgresscanner/build/release/extension/postgres_scanner/postgres_scanner.duckdb_extension` to `.env` for benchmark.
 
+To use a DuckDB data source over Quack instead, use DuckDB 1.5.3 or newer on
+both the source and coordinator. Start the endpoint from the source database:
+
+```sql
+INSTALL quack;
+LOAD quack;
+CALL quack_serve(
+    'quack:0.0.0.0:9494',
+    token => 'replace-with-a-token',
+    allow_other_hostname => true
+);
+```
+
+Copy [`benchmark/config/quack.json.example`](benchmark/config/quack.json.example)
+to the active config directory as `db1.json` (or the matching source name), then
+set its host and token. Rebuild the rewriter with `just python-setup`. The Quack
+JDBC driver supplies schema and statistics to Accio; pushed queries are executed
+with DuckDB's native `quack_query` function. For a DuckDB-only run,
+`DUCK_PG_EXTENSION` can be unset. Install the extension once in the coordinator
+environment with `python -c "import duckdb; duckdb.connect().execute('INSTALL quack')"`.
+
+This is intentionally only an endpoint adapter. It does not create or load the
+remote DuckDB database or alter the existing PostgreSQL deployment.
+
+For a Dockerized source endpoint, put an existing database named
+`source.duckdb` in a host directory and run:
+
+```bash
+mkdir -p .accio-docker/duckdb-source
+cp /path/to/source.duckdb .accio-docker/duckdb-source/source.duckdb
+QUACK_TOKEN=replace-with-a-token \
+  docker compose -f docker-compose.duckdb-source.yml up --build -d
+```
+
+Use `jdbc:quack://127.0.0.1:9494` in the example source config when Accio runs
+on the host. The container only serves the mounted database; it does not
+generate TPC-H data or decide table placement. Override `DUCKDB_DATA_DIR`,
+`DUCKDB_DATABASE_FILE`, or `QUACK_PORT` when needed. Stop it with:
+
+```bash
+docker compose -f docker-compose.duckdb-source.yml down
+```
+
+The complete two-PostgreSQL/one-DuckDB/one-DataFusion experiment topology is
+documented in [`docker/README.md`](docker/README.md) and configured through
+`docker/experiment.env`.
+
 #### Polars
 
 We made a minor update to polars so that it can support more quries in our evaluation. To reproduce:

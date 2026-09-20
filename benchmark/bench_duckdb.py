@@ -32,6 +32,11 @@ from accio import AccioSession, run_duckdb, clean_duckdb
 import duckdb
 
 
+def arrow_table(relation):
+    result = relation.arrow()
+    return result.read_all() if hasattr(result, "read_all") else result
+
+
 def bench_duckdb_native(conn, args):
     # parse configuration
     config = {}
@@ -62,7 +67,7 @@ def bench_duckdb_native(conn, args):
             print(f"------------ run {i} ------------")
             with Timer() as timer:
                 df = conn.sql(sql)
-                table = df.arrow()
+                table = arrow_table(df)
             print(f"get {table.num_rows} rows, {table.num_columns} cols")
             print(f"{filename} took {timer.elapsed:.2f} in total")
             if args["--explain"]:
@@ -75,9 +80,13 @@ def bench_duckdb_native(conn, args):
 def bench_duckdb_accio(conn, args):
     # start accio session and attach to external databases
     accio = AccioSession(args["<db>"], config_path=args["--config"])
+    if any(info["config"]["type"].upper() == "QUACK" for info in accio.dbs.values()):
+        conn.load_extension("quack")
     for db, info in accio.dbs.items():
         if db == "local" or info["config"]["type"] == "MANUAL":
             continue # only register remote non-manual ones
+        if info["config"]["type"].upper() == "QUACK":
+            continue # quack_query uses the configured remote URI directly
         conn.sql(f"""ATTACH '{info["url"]}' AS {db} (TYPE {info["config"]["type"]}, READ_ONLY)""")
 
     # traverse and workload
@@ -93,8 +102,8 @@ def bench_duckdb_accio(conn, args):
             with Timer(factor=1000) as timer: # measure in milliseconds
                 plan = accio.rewrite(sql, stragegy=args["--strategy"])
                 print(f"{filename} took {timer.elapsed:.2f} in rewrite (ms)")
-                df = run_duckdb(plan, conn)
-                table = df.arrow()
+                df = run_duckdb(plan, conn, accio)
+                table = arrow_table(df)
             print(f"get {table.num_rows} rows, {table.num_columns} cols")
             print(f"{filename} took {timer.elapsed/1000:.2f} in total")
             if args["--explain"]:
@@ -130,7 +139,7 @@ def bench_duckdb_manual(conn, args):
                 continue
             with Timer(factor=1000) as timer: # measure in milliseconds
                 df = run_duckdb(plan, conn)
-                table = df.arrow()
+                table = arrow_table(df)
             print(f"get {table.num_rows} rows, {table.num_columns} cols")
             print(f"{idx} {pushdowns} took {timer.elapsed/1000:.2f} in total")
             if args["--explain"]:
@@ -153,8 +162,10 @@ if __name__ == "__main__":
         "threads": args["--cores"], 
         "memory_limit": args["--memory"],
         "allow_unsigned_extensions": "true"})
-    conn.install_extension(os.environ["DUCK_PG_EXTENSION"])
-    conn.load_extension(os.environ["DUCK_PG_EXTENSION"])
+    postgres_extension = os.environ.get("DUCK_PG_EXTENSION", "").strip()
+    if postgres_extension:
+        conn.install_extension(postgres_extension)
+        conn.load_extension(postgres_extension)
     print(f"duckdb connection started...")
 
     if args["--disable-jo"]:

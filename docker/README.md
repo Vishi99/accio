@@ -1,24 +1,29 @@
-# Docker experiments: DuckDB coordinator + three PostgreSQL sources
+# Docker experiments: DuckDB coordinator + mixed data sources
 
-This deployment runs one Accio/DuckDB coordinator and three PostgreSQL
-data sources. It supports both:
+The default deployment runs one Accio/DuckDB coordinator, two PostgreSQL
+sources, one DuckDB source served through Quack, and one DataFusion source
+served through PGWire. It supports both:
 
 - Docker Compose on one machine, for development and smoke tests.
-- Docker Swarm on four machines, with each service pinned to a labeled node.
+- Docker Swarm on five machines, with each service pinned to a labeled node.
 
-The PostgreSQL containers load their assigned TPC-H `.tbl` files only when
-their data volumes are first created. The coordinator waits for all source loads,
-checks that the physical table distribution matches the configuration, writes
-the Accio source configs, and runs the selected `tpch2_v*` workload.
+PostgreSQL and DuckDB load their assigned TPC-H `.tbl` files when their data
+volumes are first created. DataFusion registers its assigned files as external
+tables on every container start and does not copy them. The coordinator waits
+for all sources, validates their assigned tables, writes the Accio source
+configs, and runs the selected `tpch2_v*` workload.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `docker-compose.multinode.yml` | Four-service Compose/Swarm topology |
+| `docker-compose.multinode.yml` | Five-service Compose/Swarm topology |
 | `docker/experiment.env.example` | All experiment, TPC-H, resource, and cost settings |
 | `docker/coordinator/Dockerfile` | Accio, DuckDB, custom PostgreSQL scanner, and rewriter image |
+| `docker/coordinator/Dockerfile.mixed` | Modern DuckDB coordinator with PostgreSQL and Quack extensions |
 | `docker/postgres/Dockerfile` | PostgreSQL image with TPC-H loader and optional `netem` support |
+| `docker/duckdb/Dockerfile` | DuckDB source served over Quack |
+| `docker/datafusion/Dockerfile` | DataFusion source served by `datafusion-postgres` PGWire |
 | `generate_tpch_data.sh` | Clone, build, and run TPC-H dbgen |
 | `run_multinode_experiments.sh` | Build/deploy/log/status/rerun wrapper |
 | `run_docker_experiments.sh` | Existing imperative single-host runner |
@@ -35,15 +40,18 @@ the Accio source configs, and runs the selected `tpch2_v*` workload.
   |                    |--------->| postgres2 (Accio schema name: db2)   |
   |                    |          | assigned subset of TPC-H tables      |
   |                    |          +---------------------------------------+
-  |                    |--------->| postgres3 (Accio schema name: db3)   |
-  +--------------------+          | assigned subset of TPC-H tables      |
+  |                    |--------->| duckdb3 (Accio schema name: db3)     |
+  |                    |          | assigned subset of TPC-H tables      |
+  |                    |          +---------------------------------------+
+  |                    |--------->| datafusion4 (Accio schema name: db4) |
+  +--------------------+          | external TPC-H tables over PGWire    |
                                   +---------------------------------------+
 ```
 
-DuckDB is embedded in the coordinator process; it is not a network database
-service. PostgreSQL ports are not published to the host. Communication stays
-on the deployment network under the service names `postgres1`, `postgres2`,
-and `postgres3`.
+DuckDB is embedded in the coordinator process. `duckdb3` is a separate DuckDB
+process reached over Quack. `datafusion4` runs DataFusion behind a PostgreSQL
+wire-compatible endpoint. Source ports are not published to the host;
+communication stays on the deployment network.
 
 ## Prerequisites
 
@@ -53,17 +61,22 @@ and `postgres3`.
 - TPC-H `dbgen` output containing these files:
   `region.tbl`, `nation.tbl`, `supplier.tbl`, `customer.tbl`, `part.tbl`,
   `partsupp.tbl`, `orders.tbl`, and `lineitem.tbl`.
-- Enough free disk for three PostgreSQL volumes, the images, and coordinator
-  results. The coordinator image is slow to build the first time because it
-  compiles the custom DuckDB/PostgreSQL scanner and the Java rewriter.
+- Enough free disk for two PostgreSQL volumes, one DuckDB volume, the images,
+  the mounted dbgen files, and coordinator results. DataFusion reads those
+  files in place and has no data volume.
 
-The scanner build uses Ninja and four parallel compile jobs by default. Set
+The legacy PostgreSQL-only coordinator scanner build uses Ninja and four
+parallel compile jobs by default. Set
 `POSTGRESSCANNER_BUILD_JOBS` in `docker/experiment.env` to the number of jobs
 your Docker VM can comfortably support. More jobs usually shorten the first
 build; if the build is killed or reports an out-of-memory error, reduce it to
 `2` or `1`. Once a build succeeds, Docker caches that layer, so later builds do
 not recompile the scanner unless its Dockerfile, repository, ref, or build-job
 setting changes.
+
+The first DataFusion image build compiles the pinned
+`datafusion-postgres-cli` Rust crate and can take several minutes. Docker caches
+that build; changing neither its version nor Dockerfile avoids recompiling it.
 
 Generate SF1 with the included script:
 
@@ -91,7 +104,7 @@ The first positional argument is the scale and the optional second argument is
 the output directory. Existing `.tbl` files are overwritten by dbgen. The
 selected scale must match `TPCH_SCALE` in the experiment env file.
 
-## Local four-container quick start
+## Local five-container quick start
 
 Generate the data, then create the active config and use the absolute paths
 printed by the generator:
@@ -110,6 +123,7 @@ NETWORK_DRIVER=bridge
 TPCH_DATA_DIR_DB1=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_DB2=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_DB3=/absolute/path/to/tpch-dbgen-output
+TPCH_DATA_DIR_DB4=/absolute/path/to/tpch-dbgen-output
 TPCH_DATA_DIR_COORDINATOR=/absolute/path/to/tpch-dbgen-output
 ACCIO_RESULTS_DIR=/absolute/path/to/accio-results
 ACCIO_EXPLAIN=true
@@ -144,21 +158,23 @@ Then validate, build, deploy, and follow the experiment:
 ./run_multinode_experiments.sh logs
 ```
 
-To discard all PostgreSQL databases and perform a guaranteed fresh Compose
+To discard all source databases and perform a guaranteed fresh Compose
 load, use:
 
 ```bash
 ./run_multinode_experiments.sh fresh
 ```
 
-`fresh` permanently removes the three PostgreSQL data volumes resolved from the
-running containers, verifies their removal, and redeploys. It does not modify
-`ACCIO_RESULTS_DIR` or the source `.tbl` files. It is intentionally not
-available in Swarm mode because those volumes reside on separate nodes.
+`fresh` permanently removes the two PostgreSQL volumes and the DuckDB volume
+resolved from the running containers, verifies their removal, and redeploys.
+DataFusion is restarted and re-registers the mounted files; it has no volume to
+delete. `fresh` does not modify `ACCIO_RESULTS_DIR` or the source `.tbl` files.
+It is intentionally unavailable in Swarm mode because persistent volumes are
+node-local.
 
 The coordinator is intentionally a one-shot container and shows as `Exited (0)`
-after success. PostgreSQL remains running. Run the same experiment again without
-reloading data with:
+after success. The sources remain running. Run the same experiment again
+without reloading persistent source data with:
 
 ```bash
 ./run_multinode_experiments.sh rerun
@@ -171,7 +187,7 @@ Inspect or stop the deployment with:
 ./run_multinode_experiments.sh down
 ```
 
-`down` retains the PostgreSQL volumes and the host result logs. Read the latest
+`down` retains the source volumes and the host result logs. Read the latest
 logs directly without `docker cp`:
 
 ```bash
@@ -179,9 +195,9 @@ ls -lt /absolute/path/to/accio-results
 less /absolute/path/to/accio-results/tpch-sf1-v1-all-TIMESTAMP.log
 ```
 
-## Four-host Docker Swarm setup
+## Five-host Docker Swarm setup
 
-The expected roles are one manager/coordinator host and three source hosts. A
+The expected roles are one manager/coordinator host and four source hosts. A
 manager may also be a worker, but each label should identify the intended
 machine. On the manager:
 
@@ -191,17 +207,18 @@ docker swarm join-token worker
 ```
 
 Run the printed `docker swarm join ...` command on all source hosts. Back on
-the manager, obtain the node names and assign the four placement labels:
+the manager, obtain the node names and assign the five placement labels:
 
 ```bash
 docker node ls
 docker node update --label-add accio.role=coordinator COORDINATOR_NODE
 docker node update --label-add accio.role=postgres1 POSTGRES1_NODE
 docker node update --label-add accio.role=postgres2 POSTGRES2_NODE
-docker node update --label-add accio.role=postgres3 POSTGRES3_NODE
+docker node update --label-add accio.role=duckdb3 DUCKDB3_NODE
+docker node update --label-add accio.role=datafusion4 DATAFUSION4_NODE
 ```
 
-Put the matching TPC-H files on each node that owns tables. All four bind
+Put the matching TPC-H files on each node that owns tables. All five bind
 directories must exist even when the coordinator owns no tables. The paths may
 differ; the env file supplies one bind path per node:
 
@@ -210,6 +227,7 @@ DEPLOY_MODE=swarm
 TPCH_DATA_DIR_DB1=/data/tpch/sf1
 TPCH_DATA_DIR_DB2=/mnt/benchmarks/tpch/sf1
 TPCH_DATA_DIR_DB3=/data/tpch/sf1
+TPCH_DATA_DIR_DB4=/data/tpch/sf1
 TPCH_DATA_DIR_COORDINATOR=/data/tpch/sf1
 ACCIO_RESULTS_DIR=/data/accio-results
 ```
@@ -217,12 +235,14 @@ ACCIO_RESULTS_DIR=/data/accio-results
 Create `ACCIO_RESULTS_DIR` on the node labeled `accio.role=coordinator` before
 deploying the stack.
 
-Swarm nodes pull images rather than using the Compose `build` section. Set both
+Swarm nodes pull images rather than using the Compose `build` section. Set all
 image names to a registry reachable by every node:
 
 ```dotenv
 ACCIO_COORDINATOR_IMAGE=registry.example.edu/accio/coordinator:latest
 ACCIO_POSTGRES_IMAGE=registry.example.edu/accio/postgres:latest
+ACCIO_DUCKDB_IMAGE=registry.example.edu/accio/duckdb:latest
+ACCIO_DATAFUSION_IMAGE=registry.example.edu/accio/datafusion:latest
 ```
 
 Log in to that registry if necessary, then build, push, and deploy from the
@@ -262,37 +282,111 @@ ls -lt /data/accio-results
 without copying by prefixing any wrapper command with
 `ACCIO_ENV_FILE=/absolute/path/to/config.env`.
 
+### Source registry
+
+The coordinator source count and connection types come from the env file:
+
+```dotenv
+ACCIO_SOURCES="db1 db2 db3 db4"
+DB1_TYPE=POSTGRES
+DB1_HOST=postgres1
+DB1_PORT=5432
+DB2_TYPE=POSTGRES
+DB2_HOST=postgres2
+DB2_PORT=5432
+DB3_TYPE=DUCKDB
+DB3_HOST=duckdb3
+DB3_PORT=9494
+DB3_TOKEN=replace-with-a-long-random-token
+DB3_DISABLE_SSL=true
+DB4_TYPE=DATAFUSION
+DB4_HOST=datafusion4
+DB4_PORT=5432
+DB4_DATABASE=postgres
+DB4_USERNAME=postgres
+DB4_PASSWORD=unused
+```
+
+Supported source types are `POSTGRES`, `DUCKDB`/`QUACK`, and `DATAFUSION`.
+DataFusion uses PGWire for transport but Accio's DataFusion dialect for pushed
+SQL. It deliberately uses Accio's generic cardinality estimator and no
+PostgreSQL CTID partitioner. Per-source
+`DBn_USERNAME`, `DBn_PASSWORD`, `DBn_DATABASE`, and `DBn_JDBC_URL` override the
+shared defaults. To add another already-deployed supported source,
+append its name to `ACCIO_SOURCES`, add its `DBn_*` settings,
+`TPCH_TABLES_DBn`, and `TPCH_DATA_DIR_DBn`; no coordinator code change is
+required. If the Docker service name does not follow `postgresN`, `duckdbN`, or
+`datafusionN`, set `DBn_SERVICE`.
+
+For example, after a `duckdb4` service exists on the deployment network and
+receives the same env file, adding it to Accio requires only:
+
+```dotenv
+ACCIO_SOURCES="db1 db2 db3 db4"
+DB4_TYPE=DUCKDB
+DB4_HOST=duckdb4
+DB4_PORT=9494
+DB4_TOKEN=replace-with-a-long-random-token
+DB4_DISABLE_SSL=true
+TPCH_TABLES_DB4="supplier"
+TPCH_DATA_DIR_DB4=/absolute/path/to/tpch-dbgen-output
+```
+
+Move `supplier` out of its old `TPCH_TABLES_DBn` list so every table remains
+assigned exactly once. The source service must set `TPCH_SOURCE_ID=db4`; the
+provided loaders resolve `TPCH_TABLES_DB4` dynamically.
+
+For the provided DB4 service, the entrypoint starts
+`datafusion-postgres-cli`, then issues `CREATE EXTERNAL TABLE` for each assigned
+TPC-H file with an explicit pipe-delimited schema. The final dbgen delimiter is
+represented by an unused `_accio_trailing` column, so the source files are used
+without rewriting or copying. Check the registered source directly with:
+
+```bash
+set -a; source docker/experiment.env; set +a
+ACCIO_ENV_FILE=docker/experiment.env docker compose \
+  --env-file docker/experiment.env -f docker-compose.multinode.yml \
+  --project-name "$STACK_NAME" exec datafusion4 \
+  psql -h 127.0.0.1 -U postgres -d postgres -c 'SELECT count(*) FROM orders;'
+```
+
+Replace `orders` if DB4 owns another table. The generated Accio JSON uses the
+PostgreSQL connector only as the execution transport; `dialect=datafusion`
+controls pushed SQL, while generic cardinality and partition implementations
+avoid PostgreSQL-only catalog and CTID assumptions.
+
 ### TPC-H scale and distribution
 
-`TPCH_SCALE` supports `1`, `10`, and `50`. The default distribution setting is
-`TPCH_PLACEMENT=v1` in `docker/experiment.env`. `TPCH_PLACEMENT` selects both
+`TPCH_SCALE` supports `1`, `10`, and `50`. The example distribution setting is
+`TPCH_PLACEMENT=v2` in `docker/experiment.env`. `TPCH_PLACEMENT` selects both
 the default physical table distribution and the corresponding
 `workload/tpch2_<placement>` SQL directory:
 
-| Placement | `db1` / `postgres1` | `db2` / `postgres2` | `db3` / `postgres3` | coordinator / DuckDB |
-| --- | --- | --- | --- | --- |
-| `v0` | region, nation, supplier, customer, orders, lineitem | part, partsupp | none | none |
-| `v1` (default) | region, nation, supplier, customer, part, partsupp | orders, lineitem | none | none |
-| `v2` | part, partsupp, orders, lineitem | region, nation, supplier, customer | none | none |
+| Placement | `db1` / PostgreSQL | `db2` / PostgreSQL | `db3` / DuckDB | `db4` / DataFusion | coordinator / DuckDB |
+| --- | --- | --- | --- | --- | --- |
+| `v0` | region, nation, supplier, customer, orders, lineitem | part, partsupp | none | none | none |
+| `v1` | region, nation, supplier, customer, part, partsupp | orders, lineitem | none | none | none |
+| `v2` defaults | part, partsupp, orders, lineitem | region, nation, supplier, customer | none | none | none |
 
-For a completely explicit two-source distribution, set both PostgreSQL lists.
-Every TPC-H table must occur exactly once across them:
+For a completely explicit distribution, set every source list. Every TPC-H
+table must occur exactly once across the source and coordinator lists:
 
 ```dotenv
 TPCH_TABLES_DB1="region nation supplier customer part partsupp"
 TPCH_TABLES_DB2="orders lineitem"
 TPCH_TABLES_DB3=
+TPCH_TABLES_DB4=
 TPCH_TABLES_COORDINATOR=
 ```
 
-To use all three PostgreSQL sources with the v2 workload, split the original
-v2 `db1` tables between `db1` and `db3`:
+The example env overrides the v2 defaults to use all four sources:
 
 ```dotenv
 TPCH_PLACEMENT=v2
 TPCH_TABLES_DB1="part partsupp"
 TPCH_TABLES_DB2="region nation supplier customer"
-TPCH_TABLES_DB3="orders lineitem"
+TPCH_TABLES_DB3="lineitem"
+TPCH_TABLES_DB4="orders"
 TPCH_TABLES_COORDINATOR=
 ```
 
@@ -320,17 +414,18 @@ coordinator and executes the resulting federated plan.
 - `ACCIO_EXPLAIN`: set to `true` to print Accio and DuckDB plans.
 - `ACCIO_RESULTS_DIR`: absolute host path receiving timestamped `.log` files.
   No DuckDB database files are persisted there.
-- `STARTUP_TIMEOUT_SECONDS`: maximum wait per PostgreSQL source, including load.
+- `STARTUP_TIMEOUT_SECONDS`: maximum wait per source, including initial load.
 
-### PostgreSQL and network
+### Data sources and network
 
 - `PG_SHARED_BUFFERS`, `PG_SHM_SIZE`, `PG_MAX_CONNECTIONS`, and worker settings
   control each PostgreSQL instance.
 - `PG_MAX_PARALLELISM` controls Accio's PostgreSQL query partitioner.
 - `DB_STATS_TARGET` is used while collecting optimizer statistics after load.
+- `DATAFUSION_POSTGRES_VERSION` pins the PGWire server crate compiled into the
+  DataFusion source image.
 - `BANDWIDTH=none` uses the real network. A value such as `1gbit` installs a
-  per-source `netem` egress limit. Three active sources can therefore provide
-  three times that bandwidth in aggregate. The containers receive only
+  separate `netem` egress limit on each source. The containers receive only
   `NET_ADMIN`, required for this optional traffic control.
 - `COST_JOIN`, `COST_AGG`, `COST_SORT`, and `COST_TRANSFER` populate each Accio
   data-source JSON config.
@@ -338,16 +433,19 @@ coordinator and executes the resulting federated plan.
 The example password is only suitable for an isolated experiment network.
 Change it for shared machines. The password is present in container environment
 and generated Accio config, so this setup is not a production secret-management
-pattern.
+pattern. The provided DataFusion PGWire server is likewise unencrypted and
+unauthenticated; it is reachable only on the private deployment network and is
+intended for experiments, not production exposure.
 
 ## Changing scale or table placement
 
-PostgreSQL's official initialization hooks run only for an empty data directory.
-Consequently, changing `TPCH_SCALE`, `TPCH_PLACEMENT`, any table list, or the
-dbgen files requires deleting all three PostgreSQL volumes before
-redeploying.
-The coordinator checks stored metadata and fails instead of silently running a
-workload against stale placement.
+PostgreSQL and DuckDB initialization runs only for an empty data volume.
+Consequently, changing `TPCH_SCALE`, `TPCH_PLACEMENT`, their table lists, or the
+dbgen files requires deleting the two PostgreSQL volumes and the DuckDB volume
+before redeploying. DataFusion is stateless and registers the current DB4 list
+and mounted files whenever its container starts. The coordinator checks stored
+metadata for persistent sources and fails instead of silently running against
+stale placement.
 
 For local Compose, after confirming the stack name and that the data can be
 regenerated:
@@ -356,15 +454,16 @@ regenerated:
 set -a; source docker/experiment.env; set +a
 ./run_multinode_experiments.sh down
 docker volume rm "${STACK_NAME}_postgres1-data" "${STACK_NAME}_postgres2-data" \
-  "${STACK_NAME}_postgres3-data"
+  "${STACK_NAME}_duckdb3-data"
 ./run_multinode_experiments.sh deploy
 ```
 
 For Swarm, remove the stack and then run the corresponding `docker volume rm`
 for `${STACK_NAME}_postgres1-data` on the postgres1 node and
 `${STACK_NAME}_postgres2-data` on the postgres2 node, and
-`${STACK_NAME}_postgres3-data` on the postgres3 node. Swarm local volumes are
-node-local and are deliberately not deleted by the wrapper.
+`${STACK_NAME}_duckdb3-data` on the duckdb3 node. Swarm local volumes are
+node-local and are deliberately not deleted by the wrapper. Restarting the
+DataFusion service is sufficient for DB4 because it owns no data volume.
 
 ## Existing single-host runner
 
@@ -394,17 +493,18 @@ tail -f .accio-docker/accio-expt-sf1/results/*.log
 ```
 
 For the multinode runner, `./run_multinode_experiments.sh logs` follows the
-coordinator. Follow PostgreSQL loading logs with:
+coordinator. Follow source loading logs with:
 
 ```bash
 # Local Compose
 docker compose --env-file docker/experiment.env \
-  -f docker-compose.multinode.yml logs -f postgres1 postgres2 postgres3
+  -f docker-compose.multinode.yml logs -f postgres1 postgres2 duckdb3 datafusion4
 
 # Swarm
 docker service logs -f "${STACK_NAME}_postgres1"
 docker service logs -f "${STACK_NAME}_postgres2"
-docker service logs -f "${STACK_NAME}_postgres3"
+docker service logs -f "${STACK_NAME}_duckdb3"
+docker service logs -f "${STACK_NAME}_datafusion4"
 ```
 
 Result logs are available directly under `ACCIO_RESULTS_DIR`; transient DuckDB
@@ -421,8 +521,11 @@ database files are deleted and do not need to be collected.
   loads the scanner once as a smoke test and fails immediately on a mismatch.
 - A source repeatedly fails with `Missing ...tbl`: verify the bind path on that
   source node and confirm all tables assigned to it exist there.
-- The coordinator reports metadata or table mismatch: the PostgreSQL volume was
-  initialized with another placement; follow the volume reset procedure.
+- The coordinator reports metadata or table mismatch: a persistent source
+  volume was initialized with another placement; follow the reset procedure.
+- DataFusion reports a `CREATE EXTERNAL TABLE` error: inspect `datafusion4`
+  logs and verify the assigned `.tbl` file is readable. The loader includes the
+  dbgen trailing empty field as an unused `_accio_trailing` column.
 - `Remote branch parallel_query not found`: use
   `POSTGRESSCANNER_REF=prallel_query`. The fork currently publishes the branch
   with that spelling; the example env file already contains the corrected ref.
@@ -432,6 +535,7 @@ database files are deleted and do not need to be collected.
 - `tc ... Operation not permitted`: retain `cap_add: NET_ADMIN` when shaping is
   needed. If the platform forbids that capability, set `BANDWIDTH=none` and
   remove the `cap_add` block from the Compose file.
-- A long coordinator wait is normal while large `.tbl` files load. Follow both
-  source logs with `docker compose logs -f postgres1 postgres2 postgres3` locally or
+- A long coordinator wait is normal while large `.tbl` files load. Follow the
+  source logs with
+  `docker compose logs -f postgres1 postgres2 duckdb3 datafusion4` locally or
   `docker service logs -f ${STACK_NAME}_postgres1` in Swarm.

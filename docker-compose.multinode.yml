@@ -9,6 +9,8 @@ x-postgres-common: &postgres-common
     - NET_ADMIN
   networks:
     - experiment
+  env_file:
+    - ${ACCIO_ENV_FILE:-docker/experiment.env}
   healthcheck:
     test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
     interval: 10s
@@ -21,9 +23,6 @@ x-postgres-common: &postgres-common
     POSTGRES_DB: tpch${TPCH_SCALE:-1}
     TPCH_SCALE: ${TPCH_SCALE:-1}
     TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
-    TPCH_TABLES_DB1: ${TPCH_TABLES_DB1:-}
-    TPCH_TABLES_DB2: ${TPCH_TABLES_DB2:-}
-    TPCH_TABLES_DB3: ${TPCH_TABLES_DB3:-}
     TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
     DB_STATS_TARGET: ${DB_STATS_TARGET:-100}
     BANDWIDTH: ${BANDWIDTH:-none}
@@ -85,22 +84,78 @@ services:
       restart_policy:
         condition: on-failure
 
-  postgres3:
-    <<: *postgres-common
-    hostname: postgres3
+  duckdb3:
+    image: ${ACCIO_DUCKDB_IMAGE:-accio-duckdb-source:latest}
+    build:
+      context: .
+      dockerfile: docker/duckdb/Dockerfile
+      args:
+        DUCKDB_VERSION: ${DUCKDB_VERSION:-1.5.3}
+    hostname: duckdb3
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - experiment
+    env_file:
+      - ${ACCIO_ENV_FILE:-docker/experiment.env}
     environment:
-      <<: *postgres-environment
       TPCH_SOURCE_ID: db3
+      TPCH_DATA_MOUNT: /tpch-data
+      DUCKDB_DATABASE: /var/lib/duckdb/tpch.duckdb
     volumes:
-      - postgres3-data:/var/lib/postgresql/data
+      - duckdb3-data:/var/lib/duckdb
       - type: bind
-        source: ${TPCH_DATA_DIR_DB3:?set TPCH_DATA_DIR_DB3 to an absolute path on the postgres3 node}
+        source: ${TPCH_DATA_DIR_DB3:?set TPCH_DATA_DIR_DB3 to an absolute path on the duckdb3 node}
         target: /tpch-data
         read_only: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9494), 2).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
     deploy:
       placement:
         constraints:
-          - node.labels.accio.role == postgres3
+          - node.labels.accio.role == duckdb3
+      restart_policy:
+        condition: on-failure
+
+  datafusion4:
+    image: ${ACCIO_DATAFUSION_IMAGE:-accio-datafusion-source:latest}
+    build:
+      context: .
+      dockerfile: docker/datafusion/Dockerfile
+      args:
+        DATAFUSION_POSTGRES_VERSION: ${DATAFUSION_POSTGRES_VERSION:-0.17.0}
+    hostname: datafusion4
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - experiment
+    env_file:
+      - ${ACCIO_ENV_FILE:-docker/experiment.env}
+    environment:
+      TPCH_SOURCE_ID: db4
+      TPCH_DATA_MOUNT: /tpch-data
+      DATAFUSION_DATABASE: ${DB4_DATABASE:-postgres}
+    volumes:
+      - type: bind
+        source: ${TPCH_DATA_DIR_DB4:?set TPCH_DATA_DIR_DB4 to an absolute path on the datafusion4 node}
+        target: /tpch-data
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U postgres -d $${DATAFUSION_DATABASE:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      placement:
+        constraints:
+          - node.labels.accio.role == datafusion4
       restart_policy:
         condition: on-failure
 
@@ -108,8 +163,9 @@ services:
     image: ${ACCIO_COORDINATOR_IMAGE:-accio-coordinator:latest}
     build:
       context: .
-      dockerfile: docker/coordinator/Dockerfile
+      dockerfile: ${ACCIO_COORDINATOR_DOCKERFILE:-docker/coordinator/Dockerfile}
       args:
+        DUCKDB_VERSION: ${DUCKDB_VERSION:-1.5.3}
         POSTGRESSCANNER_REPOSITORY: ${POSTGRESSCANNER_REPOSITORY:-https://github.com/wangxiaoying/postgresscanner.git}
         POSTGRESSCANNER_REF: ${POSTGRESSCANNER_REF:-prallel_query}
         POSTGRESSCANNER_BUILD_JOBS: ${POSTGRESSCANNER_BUILD_JOBS:-4}
@@ -119,37 +175,12 @@ services:
     depends_on:
       - postgres1
       - postgres2
-      - postgres3
+      - duckdb3
+      - datafusion4
+    env_file:
+      - ${ACCIO_ENV_FILE:-docker/experiment.env}
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the experiment env file}
-      POSTGRES_DB: tpch${TPCH_SCALE:-1}
-      DB1_HOST: postgres1
-      DB1_PORT: 5432
-      DB2_HOST: postgres2
-      DB2_PORT: 5432
-      DB3_HOST: postgres3
-      DB3_PORT: 5432
-      TPCH_SCALE: ${TPCH_SCALE:-1}
-      TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
-      TPCH_TABLES_DB1: ${TPCH_TABLES_DB1:-}
-      TPCH_TABLES_DB2: ${TPCH_TABLES_DB2:-}
-      TPCH_TABLES_DB3: ${TPCH_TABLES_DB3:-}
-      TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
       TPCH_DATA_MOUNT: /tpch-data
-      ACCIO_RUNS: ${ACCIO_RUNS:-1}
-      ACCIO_QUERY: ${ACCIO_QUERY:-}
-      WORKLOAD_DIR: ${WORKLOAD_DIR:-}
-      ACCIO_STRATEGY: ${ACCIO_STRATEGY:-benefit}
-      ACCIO_CORES: ${ACCIO_CORES:-4}
-      ACCIO_MEMORY: ${ACCIO_MEMORY:-8GB}
-      ACCIO_EXPLAIN: ${ACCIO_EXPLAIN:-false}
-      PG_MAX_PARALLELISM: ${PG_MAX_PARALLELISM:-8}
-      COST_JOIN: ${COST_JOIN:-2.0}
-      COST_AGG: ${COST_AGG:-2.0}
-      COST_SORT: ${COST_SORT:-2.0}
-      COST_TRANSFER: ${COST_TRANSFER:-10.0}
-      STARTUP_TIMEOUT_SECONDS: ${STARTUP_TIMEOUT_SECONDS:-7200}
     volumes:
       - type: bind
         source: ${ACCIO_RESULTS_DIR:?set ACCIO_RESULTS_DIR to an absolute host path for result logs}
@@ -178,4 +209,4 @@ networks:
 volumes:
   postgres1-data:
   postgres2-data:
-  postgres3-data:
+  duckdb3-data:

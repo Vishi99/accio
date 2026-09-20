@@ -1,0 +1,28 @@
+services:
+  duckdb-source:
+    image: ${DUCKDB_SOURCE_IMAGE:-accio-duckdb-source:latest}
+    build:
+      context: .
+      dockerfile: docker/duckdb/Dockerfile
+      args:
+        DUCKDB_VERSION: ${DUCKDB_VERSION:-1.5.3}
+    cap_add:
+      - NET_ADMIN
+    environment:
+      QUACK_TOKEN: ${QUACK_TOKEN:?set QUACK_TOKEN}
+      DUCKDB_DATABASE: /data/${DUCKDB_DATABASE_FILE:-source.duckdb}
+      DUCKDB_THREADS: ${DUCKDB_THREADS:-4}
+      DUCKDB_MEMORY: ${DUCKDB_MEMORY:-8GB}
+      BANDWIDTH: ${BANDWIDTH:-none}
+    volumes:
+      - type: bind
+        source: ${DUCKDB_DATA_DIR:-./.accio-docker/duckdb-source}
+        target: /data
+    ports:
+      - "${QUACK_BIND_ADDRESS:-127.0.0.1}:${QUACK_PORT:-9494}:9494"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9494), 2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped

@@ -1,0 +1,16 @@
+{
+    "type": "QUACK",
+    "driver": "com.gizmodata.quack.jdbc.sql.QuackDriver",
+    "url": "jdbc:quack://DUCKDB_HOST:9494",
+    "username": "",
+    "password": "QUACK_TOKEN",
+    "costParams": {
+        "join": 2.0,
+        "agg": 2.0,
+        "sort": 2.0,
+        "trans": 10.0
+    },
+    "cardEstType": "duckdb",
+    "dialect": "postgres",
+    "disableOps": []
+}
