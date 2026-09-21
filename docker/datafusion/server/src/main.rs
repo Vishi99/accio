@@ -30,12 +30,14 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("r_regionkey", DataType::Int32),
             field("r_name", DataType::Utf8),
             field("r_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "nation" => vec![
             field("n_nationkey", DataType::Int32),
             field("n_name", DataType::Utf8),
             field("n_regionkey", DataType::Int32),
             field("n_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "supplier" => vec![
             field("s_suppkey", DataType::Int64),
@@ -45,6 +47,7 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("s_phone", DataType::Utf8),
             field("s_acctbal", decimal()),
             field("s_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "customer" => vec![
             field("c_custkey", DataType::Int64),
@@ -55,6 +58,7 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("c_acctbal", decimal()),
             field("c_mktsegment", DataType::Utf8),
             field("c_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "part" => vec![
             field("p_partkey", DataType::Int64),
@@ -66,6 +70,7 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("p_container", DataType::Utf8),
             field("p_retailprice", decimal()),
             field("p_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "partsupp" => vec![
             field("ps_partkey", DataType::Int64),
@@ -73,6 +78,7 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("ps_availqty", DataType::Int32),
             field("ps_supplycost", decimal()),
             field("ps_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "orders" => vec![
             field("o_orderkey", DataType::Int64),
@@ -84,6 +90,7 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("o_clerk", DataType::Utf8),
             field("o_shippriority", DataType::Int32),
             field("o_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         "lineitem" => vec![
             field("l_orderkey", DataType::Int64),
@@ -102,6 +109,7 @@ fn tpch_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
             field("l_shipinstruct", DataType::Utf8),
             field("l_shipmode", DataType::Utf8),
             field("l_comment", DataType::Utf8),
+            field("_accio_trailing", DataType::Utf8),
         ],
         _ => return Err(format!("unknown TPC-H table: {table}").into()),
     };
@@ -138,6 +146,7 @@ async fn register_table(
         .schema(&schema)
         .has_header(false)
         .delimiter(b'|')
+        .truncated_rows(true)
         .file_extension(".tbl");
     let path_text = path
         .to_str()
