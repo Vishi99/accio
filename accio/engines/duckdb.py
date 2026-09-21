@@ -5,6 +5,15 @@ def _sql_string(value):
     return str(value).replace("'", "''")
 
 
+def _postgres_queries(db, sql):
+    statements = [statement.strip() for statement in sql.split(";") if statement.strip()]
+    return " UNION ALL ".join(
+        f"SELECT * FROM postgres_query('{_sql_string(db)}', "
+        f"'{_sql_string(statement)}')"
+        for statement in statements
+    )
+
+
 def _remote_query(db, sql, card, accio=None):
     if accio is not None:
         source = accio.dbs[db]
@@ -22,10 +31,10 @@ def _remote_query(db, sql, card, accio=None):
         if config["type"].upper() == "POSTGRES" and not os.environ.get(
             "DUCK_PG_EXTENSION", ""
         ).strip():
-            return (
-                f"SELECT * FROM postgres_query('{_sql_string(db)}', "
-                f"'{_sql_string(sql)}')"
-            )
+            # Accio's PostgreSQL partitioner returns a semicolon-separated list
+            # of disjoint CTID queries. DuckDB's postgres_query accepts only one
+            # prepared statement, so expose the partitions as a UNION ALL.
+            return _postgres_queries(db, sql)
     escaped_sql = sql.replace('"', '""')
     return f"SELECT * FROM postgres_query('{db}', \"{escaped_sql}\", {card})"
 

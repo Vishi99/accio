@@ -320,6 +320,11 @@ append its name to `ACCIO_SOURCES`, add its `DBn_*` settings,
 required. If the Docker service name does not follow `postgresN`, `duckdbN`, or
 `datafusionN`, set `DBn_SERVICE`.
 
+With the mixed coordinator, Accio's semicolon-separated PostgreSQL CTID
+partitions are executed as a `UNION ALL` of individual DuckDB
+`postgres_query()` calls. This retains partitioned reads while respecting the
+extension's one-statement-per-call requirement.
+
 For example, after a `duckdb4` service exists on the deployment network and
 receives the same env file, adding it to Accio requires only:
 
