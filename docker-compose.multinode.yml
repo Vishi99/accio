@@ -127,8 +127,6 @@ services:
     build:
       context: .
       dockerfile: docker/datafusion/Dockerfile
-      args:
-        DATAFUSION_POSTGRES_VERSION: ${DATAFUSION_POSTGRES_VERSION:-0.17.0}
     hostname: datafusion4
     cap_add:
       - NET_ADMIN

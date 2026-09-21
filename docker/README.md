@@ -8,8 +8,8 @@ served through PGWire. It supports both:
 - Docker Swarm on five machines, with each service pinned to a labeled node.
 
 PostgreSQL and DuckDB load their assigned TPC-H `.tbl` files when their data
-volumes are first created. DataFusion registers its assigned files as external
-tables on every container start and does not copy them. The coordinator waits
+volumes are first created. DataFusion registers its assigned files directly
+through DataFusion's CSV API on every container start and does not copy them. The coordinator waits
 for all sources, validates their assigned tables, writes the Accio source
 configs, and runs the selected `tpch2_v*` workload.
 
@@ -74,9 +74,9 @@ build; if the build is killed or reports an out-of-memory error, reduce it to
 not recompile the scanner unless its Dockerfile, repository, ref, or build-job
 setting changes.
 
-The first DataFusion image build compiles the pinned
-`datafusion-postgres-cli` Rust crate and can take several minutes. Docker caches
-that build; changing neither its version nor Dockerfile avoids recompiling it.
+The first DataFusion image build compiles the small source server and its pinned
+`datafusion-postgres` dependencies and can take several minutes. Docker caches
+that build unless its manifest, lockfile, source, or Dockerfile changes.
 
 Generate SF1 with the included script:
 
@@ -336,11 +336,11 @@ Move `supplier` out of its old `TPCH_TABLES_DBn` list so every table remains
 assigned exactly once. The source service must set `TPCH_SOURCE_ID=db4`; the
 provided loaders resolve `TPCH_TABLES_DB4` dynamically.
 
-For the provided DB4 service, the entrypoint starts
-`datafusion-postgres-cli`, then issues `CREATE EXTERNAL TABLE` for each assigned
-TPC-H file with an explicit pipe-delimited schema. The final dbgen delimiter is
-represented by an unused `_accio_trailing` column, so the source files are used
-without rewriting or copying. Check the registered source directly with:
+For the provided DB4 service, the source process registers each assigned TPC-H
+file directly with DataFusion using an explicit pipe-delimited schema, then
+starts the PGWire endpoint. The final dbgen delimiter is represented by an
+unused `_accio_trailing` column, so the source files are used without rewriting
+or copying. Check the registered source directly with:
 
 ```bash
 set -a; source docker/experiment.env; set +a
@@ -422,8 +422,6 @@ coordinator and executes the resulting federated plan.
   control each PostgreSQL instance.
 - `PG_MAX_PARALLELISM` controls Accio's PostgreSQL query partitioner.
 - `DB_STATS_TARGET` is used while collecting optimizer statistics after load.
-- `DATAFUSION_POSTGRES_VERSION` pins the PGWire server crate compiled into the
-  DataFusion source image.
 - `BANDWIDTH=none` uses the real network. A value such as `1gbit` installs a
   separate `netem` egress limit on each source. The containers receive only
   `NET_ADMIN`, required for this optional traffic control.
@@ -523,7 +521,7 @@ database files are deleted and do not need to be collected.
   source node and confirm all tables assigned to it exist there.
 - The coordinator reports metadata or table mismatch: a persistent source
   volume was initialized with another placement; follow the reset procedure.
-- DataFusion reports a `CREATE EXTERNAL TABLE` error: inspect `datafusion4`
+- DataFusion reports a table-registration or CSV error: inspect `datafusion4`
   logs and verify the assigned `.tbl` file is readable. The loader includes the
   dbgen trailing empty field as an unused `_accio_trailing` column.
 - `Remote branch parallel_query not found`: use

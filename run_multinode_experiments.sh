@@ -300,7 +300,6 @@ build_images() {
         "$SCRIPT_DIR"
     docker build \
         --tag "$ACCIO_DATAFUSION_IMAGE" \
-        --build-arg "DATAFUSION_POSTGRES_VERSION=${DATAFUSION_POSTGRES_VERSION:-0.17.0}" \
         --file "$SCRIPT_DIR/docker/datafusion/Dockerfile" \
         "$SCRIPT_DIR"
     docker build \

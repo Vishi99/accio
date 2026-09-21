@@ -2,6 +2,7 @@
 __pycache__/
 .idea
 rewriter/target
+docker/datafusion/server/target
 rewriter/src/test/
 .accio-docker/
 docker/experiment.env
