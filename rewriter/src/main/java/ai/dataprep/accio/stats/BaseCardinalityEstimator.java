@@ -48,7 +48,11 @@ public class BaseCardinalityEstimator implements CardinalityEstimator {
 
     @Override
     public @Nullable Double getDomainSizeDirectly(FedConvention convention, RelNode rel, String column) {
-        return this.getRowCountDirectly(convention, rel);
+        Double rowCount = this.getRowCountDirectly(convention, rel);
+        // Generic sources such as DataFusion may not expose engine-specific
+        // column statistics. Join planning requires a numeric domain size, so
+        // use the same 100-row heuristic as the generic row-count fallback.
+        return rowCount == null ? 100.0d : rowCount;
     }
 
     @Override

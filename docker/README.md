@@ -310,7 +310,9 @@ DB4_PASSWORD=unused
 Supported source types are `POSTGRES`, `DUCKDB`/`QUACK`, and `DATAFUSION`.
 DataFusion uses PGWire for transport but Accio's DataFusion dialect for pushed
 SQL. It deliberately uses Accio's generic cardinality estimator and no
-PostgreSQL CTID partitioner. Per-source
+PostgreSQL CTID partitioner. When an engine-specific domain statistic is not
+available, the generic estimator uses Accio's existing 100-row heuristic; it
+does not issue an additional data scan during planning. Per-source
 `DBn_USERNAME`, `DBn_PASSWORD`, `DBn_DATABASE`, and `DBn_JDBC_URL` override the
 shared defaults. To add another already-deployed supported source,
 append its name to `ACCIO_SOURCES`, add its `DBn_*` settings,
