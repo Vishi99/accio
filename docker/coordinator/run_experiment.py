@@ -527,7 +527,13 @@ def prepare_workload(
         for owner, assigned_tables in tables.items()
         for table in assigned_tables
     }
-    source_pattern = "|".join(re.escape(source) for source in sources)
+    # The checked-in workload is qualified with the default db1/db2 schemas.
+    # Keep recognizing those template qualifiers even when a custom topology
+    # omits one of them (for example ACCIO_SOURCES="db1 db3 db4").
+    workload_sources = set(DEFAULT_SOURCES) | set(sources)
+    source_pattern = "|".join(
+        re.escape(source) for source in sorted(workload_sources)
+    )
     query_files = sorted(source_dir.glob("q*.sql"))
     if not query_files:
         raise SystemExit(f"[accio-coordinator] no q*.sql files found in {source_dir}")

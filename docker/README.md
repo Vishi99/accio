@@ -393,7 +393,9 @@ TPCH_TABLES_COORDINATOR=
 Quote non-empty lists because the env file is also loaded as shell syntax.
 `WORKLOAD_DIR` can select another workload directory inside the coordinator
 image; its existing source qualifiers are normalized to the
-configured ownership before execution.
+configured ownership before execution. The normalizer continues to recognize
+the checked-in `db1` through `db4` qualifiers even when one of those sources is
+not listed in `ACCIO_SOURCES`.
 
 The loader accepts `TPCH_TABLES_COORDINATOR`, but the current Accio `benefit`
 and `pushdown` rewriters do not correctly plan coordinator-resident base tables.
