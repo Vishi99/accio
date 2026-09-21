@@ -349,9 +349,9 @@ provided loaders resolve `TPCH_TABLES_DB4` dynamically.
 
 For the provided DB4 service, the source process registers each assigned TPC-H
 file directly with DataFusion using an explicit pipe-delimited schema, then
-starts the PGWire endpoint. The final dbgen delimiter is represented by an
-unused `_accio_trailing` column, so the source files are used without rewriting
-or copying. Check the registered source directly with:
+starts the PGWire endpoint. DataFusion ignores dbgen's final delimiter, so the
+schema contains only the actual TPC-H columns and the files are used without
+rewriting or copying. Check the registered source directly with:
 
 ```bash
 set -a; source docker/experiment.env; set +a
@@ -535,8 +535,8 @@ database files are deleted and do not need to be collected.
 - The coordinator reports metadata or table mismatch: a persistent source
   volume was initialized with another placement; follow the reset procedure.
 - DataFusion reports a table-registration or CSV error: inspect `datafusion4`
-  logs and verify the assigned `.tbl` file is readable. The loader includes the
-  dbgen trailing empty field as an unused `_accio_trailing` column.
+  logs and verify the assigned `.tbl` file is readable. The DataFusion CSV
+  reader ignores dbgen's final delimiter and expects only the real columns.
 - `Remote branch parallel_query not found`: use
   `POSTGRESSCANNER_REF=prallel_query`. The fork currently publishes the branch
   with that spelling; the example env file already contains the corrected ref.
