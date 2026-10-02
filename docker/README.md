@@ -247,9 +247,11 @@ ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh rerun
 ```
 
 Set `ACCIO_QUERY=q01a` for one query or leave it empty to run every `q*.sql`
-file in `workload/job2_${ACCIO_DATASET_VARIANT}`. The example distribution is
-configured entirely by `ACCIO_TABLES_DB1`, `ACCIO_TABLES_DB3`, and
-`ACCIO_TABLES_DB4`; every JOB table must occur exactly once.
+file. The JOB example selects `/opt/accio/workload/fqp_job`, whose 113 queries
+are already qualified for this three-source placement. The coordinator still
+checks and normalizes those qualifiers against `ACCIO_TABLES_DB1`,
+`ACCIO_TABLES_DB3`, and `ACCIO_TABLES_DB4`; every JOB table must occur exactly
+once.
 
 ## Five-host Docker Swarm setup
 
