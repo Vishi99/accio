@@ -218,6 +218,18 @@ The example starts exactly these services:
 coordinator  postgres1  duckdb3  datafusion4
 ```
 
+The example translates the original logical site labels by engine:
+
+| Logical site | Docker source | JOB tables |
+| --- | --- | --- |
+| `pg1` / DuckDB | `db3` / `duckdb3` | aka_name, cast_info, char_name, info_type, person_info, role_type, name |
+| `pg2` placement | `db4` / `datafusion4` | complete_cast, comp_cast_type, link_type, title, movie_info, movie_info_idx, movie_link |
+| `pg3` / PostgreSQL | `db1` / `postgres1` | aka_title, company_name, company_type, keyword, kind_type, movie_companies, movie_keyword |
+
+Calcite is the Accio coordinator's optimizer rather than a standalone database
+service in this topology. The `pg2` table placement is hosted by the existing
+DataFusion source.
+
 Validate, build, and create fresh source databases:
 
 ```bash
