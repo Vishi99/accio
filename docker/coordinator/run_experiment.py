@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wait for the TPC-H sources, generate Accio config, and run DuckDB."""
+"""Wait for benchmark sources, generate Accio config, and run DuckDB."""
 
 from __future__ import annotations
 
@@ -17,19 +17,10 @@ from pathlib import Path
 import psycopg2
 import duckdb
 
+from docker.dataset_catalog import DATASET_COLUMNS, JOB_PLACEMENTS
 
-ALL_TABLES = {
-    "region",
-    "nation",
-    "supplier",
-    "customer",
-    "part",
-    "partsupp",
-    "orders",
-    "lineitem",
-}
 DEFAULT_SOURCES = ("db1", "db2", "db3", "db4")
-DEFAULT_PLACEMENTS = {
+TPCH_PLACEMENTS = {
     "v0": {
         "db1": {"region", "nation", "supplier", "customer", "orders", "lineitem"},
         "db2": {"part", "partsupp"},
@@ -48,16 +39,6 @@ DEFAULT_PLACEMENTS = {
         "db3": set(),
         "db4": set(),
     },
-}
-TPCH_COLUMNS = {
-    "region": [("r_regionkey", "INTEGER"), ("r_name", "VARCHAR"), ("r_comment", "VARCHAR")],
-    "nation": [("n_nationkey", "INTEGER"), ("n_name", "VARCHAR"), ("n_regionkey", "INTEGER"), ("n_comment", "VARCHAR")],
-    "supplier": [("s_suppkey", "BIGINT"), ("s_name", "VARCHAR"), ("s_address", "VARCHAR"), ("s_nationkey", "INTEGER"), ("s_phone", "VARCHAR"), ("s_acctbal", "DECIMAL(15,2)"), ("s_comment", "VARCHAR")],
-    "customer": [("c_custkey", "BIGINT"), ("c_name", "VARCHAR"), ("c_address", "VARCHAR"), ("c_nationkey", "INTEGER"), ("c_phone", "VARCHAR"), ("c_acctbal", "DECIMAL(15,2)"), ("c_mktsegment", "VARCHAR"), ("c_comment", "VARCHAR")],
-    "part": [("p_partkey", "BIGINT"), ("p_name", "VARCHAR"), ("p_mfgr", "VARCHAR"), ("p_brand", "VARCHAR"), ("p_type", "VARCHAR"), ("p_size", "INTEGER"), ("p_container", "VARCHAR"), ("p_retailprice", "DECIMAL(15,2)"), ("p_comment", "VARCHAR")],
-    "partsupp": [("ps_partkey", "BIGINT"), ("ps_suppkey", "BIGINT"), ("ps_availqty", "INTEGER"), ("ps_supplycost", "DECIMAL(15,2)"), ("ps_comment", "VARCHAR")],
-    "orders": [("o_orderkey", "BIGINT"), ("o_custkey", "BIGINT"), ("o_orderstatus", "VARCHAR"), ("o_totalprice", "DECIMAL(15,2)"), ("o_orderdate", "DATE"), ("o_orderpriority", "VARCHAR"), ("o_clerk", "VARCHAR"), ("o_shippriority", "INTEGER"), ("o_comment", "VARCHAR")],
-    "lineitem": [("l_orderkey", "BIGINT"), ("l_partkey", "BIGINT"), ("l_suppkey", "BIGINT"), ("l_linenumber", "INTEGER"), ("l_quantity", "DECIMAL(15,2)"), ("l_extendedprice", "DECIMAL(15,2)"), ("l_discount", "DECIMAL(15,2)"), ("l_tax", "DECIMAL(15,2)"), ("l_returnflag", "VARCHAR"), ("l_linestatus", "VARCHAR"), ("l_shipdate", "DATE"), ("l_commitdate", "DATE"), ("l_receiptdate", "DATE"), ("l_shipinstruct", "VARCHAR"), ("l_shipmode", "VARCHAR"), ("l_comment", "VARCHAR")],
 }
 
 
@@ -97,28 +78,44 @@ def configured_sources() -> tuple[str, ...]:
     return sources
 
 
-def configured_tables(placement: str, sources: tuple[str, ...]) -> dict[str, set[str]]:
-    if placement not in DEFAULT_PLACEMENTS:
-        raise SystemExit("[accio-coordinator] TPCH_PLACEMENT must be v0, v1, or v2")
+def configured_tables(
+    dataset: str, placement: str, sources: tuple[str, ...]
+) -> dict[str, set[str]]:
+    placements = TPCH_PLACEMENTS if dataset == "tpch" else JOB_PLACEMENTS
+    all_tables = set(DATASET_COLUMNS[dataset])
+    if placement not in placements:
+        raise SystemExit("[accio-coordinator] ACCIO_DATASET_VARIANT must be v0, v1, or v2")
 
-    coordinator_tables = set(os.environ.get("TPCH_TABLES_COORDINATOR", "").split())
+    coordinator_value = os.environ.get(
+        "ACCIO_TABLES_COORDINATOR", os.environ.get("TPCH_TABLES_COORDINATOR", "")
+    )
+    coordinator_tables = set(coordinator_value.split())
+    if dataset == "job" and coordinator_tables:
+        raise SystemExit(
+            "[accio-coordinator] coordinator-resident JOB tables are not supported; "
+            "keep ACCIO_TABLES_COORDINATOR empty"
+        )
     result: dict[str, set[str]] = {"coordinator": coordinator_tables}
     for source in sources:
-        override = os.environ.get(f"TPCH_TABLES_{source.upper()}", "").split()
+        prefix = source.upper()
+        override_value = os.environ.get(
+            f"ACCIO_TABLES_{prefix}", os.environ.get(f"TPCH_TABLES_{prefix}", "")
+        )
+        override = override_value.split()
         result[source] = (
             set(override)
             if override
-            else DEFAULT_PLACEMENTS[placement].get(source, set()) - coordinator_tables
+            else placements[placement].get(source, set()) - coordinator_tables
         )
 
     all_assigned = set().union(*result.values())
     overlap = {
         table
-        for table in ALL_TABLES
+        for table in all_tables
         if sum(table in assigned_tables for assigned_tables in result.values()) > 1
     }
-    unknown = all_assigned - ALL_TABLES
-    missing = ALL_TABLES - all_assigned
+    unknown = all_assigned - all_tables
+    missing = all_tables - all_assigned
     if overlap or unknown or missing:
         raise SystemExit(
             "[accio-coordinator] invalid table distribution: "
@@ -127,7 +124,7 @@ def configured_tables(placement: str, sources: tuple[str, ...]) -> dict[str, set
     return result
 
 
-def source_config(source: str) -> dict[str, object]:
+def source_config(source: str, dataset: str) -> dict[str, object]:
     prefix = source.upper()
     source_type = env(f"{prefix}_TYPE", "POSTGRES").upper()
     cost_params = {
@@ -142,7 +139,7 @@ def source_config(source: str) -> dict[str, object]:
         database = first_env(
             f"{prefix}_DATABASE",
             "POSTGRES_DB",
-            default=f"tpch{env('TPCH_SCALE', '1')}",
+            default=(f"tpch{env('TPCH_SCALE', '1')}" if dataset == "tpch" else "job"),
         )
         return {
             "type": "POSTGRES",
@@ -320,23 +317,23 @@ def quack_source_state(
 
 
 def datafusion_source_state(
-    config: dict[str, object], expected_tables: set[str]
+    config: dict[str, object], expected_tables: set[str], all_tables: set[str]
 ) -> tuple[bool, tuple[object, ...] | None, set[str]]:
     """Probe assigned tables without relying on PostgreSQL system catalogs."""
     with psycopg2.connect(**connection_kwargs(config)) as connection:
         with connection.cursor() as cursor:
             for table in sorted(expected_tables):
-                if table not in ALL_TABLES:
-                    raise ValueError(f"invalid TPC-H table name: {table}")
+                if table not in all_tables:
+                    raise ValueError(f"invalid dataset table name: {table}")
                 cursor.execute(f'SELECT * FROM "{table}" LIMIT 0')
     return False, None, set(expected_tables)
 
 
 def source_state(
-    config: dict[str, object], expected_tables: set[str]
+    config: dict[str, object], expected_tables: set[str], all_tables: set[str]
 ) -> tuple[bool, tuple[object, ...] | None, set[str]]:
     if str(config.get("accioSourceType", "")).upper() == "DATAFUSION":
-        return datafusion_source_state(config, expected_tables)
+        return datafusion_source_state(config, expected_tables, all_tables)
     if str(config["type"]).upper() == "QUACK":
         return quack_source_state(config)
     return postgres_source_state(config)
@@ -347,7 +344,8 @@ def wait_for_source(
     config: dict[str, object],
     expected_tables: set[str],
     placement: str,
-    scale: str,
+    dataset_signature: str,
+    all_tables: set[str],
     timeout: int,
 ) -> None:
     started = time.monotonic()
@@ -362,7 +360,9 @@ def wait_for_source(
     )
     while time.monotonic() < deadline:
         try:
-            metadata_table, metadata, actual_tables = source_state(config, expected_tables)
+            metadata_table, metadata, actual_tables = source_state(
+                config, expected_tables, all_tables
+            )
         except Exception as error:  # readiness failures are retried until the deadline
             error_text = str(error)
             sqlstate = getattr(error, "pgcode", None) or getattr(
@@ -377,7 +377,7 @@ def wait_for_source(
             if actual_source_type == "POSTGRES" and database_absent:
                 raise SystemExit(
                     f"[accio-coordinator] configured database is absent on {source}; "
-                    "reset the PostgreSQL volume after changing TPCH_SCALE"
+                    "reset the PostgreSQL volume after changing dataset configuration"
                 ) from error
             last_error = error_text
             now = time.monotonic()
@@ -425,12 +425,17 @@ def wait_for_source(
                 next_progress_report = now + 30
             time.sleep(5)
             continue
-        actual_placement, actual_source, _, actual_scale = metadata
-        if (actual_placement, actual_source, actual_scale) != (placement, source, scale):
+        actual_placement, actual_source, _, actual_signature = metadata
+        if (actual_placement, actual_source, actual_signature) != (
+            placement,
+            source,
+            dataset_signature,
+        ):
             raise SystemExit(
                 "[accio-coordinator] stale dataset metadata in "
-                f"{source}: got {actual_placement}/{actual_source}/sf{actual_scale}, "
-                f"expected {placement}/{source}/sf{scale}; reset the source data volume"
+                f"{source}: got {actual_placement}/{actual_source}/{actual_signature}, "
+                f"expected {placement}/{source}/{dataset_signature}; "
+                "reset the source data volume"
             )
         if actual_tables != expected_tables:
             raise SystemExit(
@@ -450,12 +455,13 @@ def write_configs(
     config_dir: Path,
     configs: dict[str, dict[str, object]],
     coordinator_tables: set[str],
+    columns_by_table: dict[str, list[tuple[str, str]]],
 ) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     for source, config in configs.items():
         (config_dir / f"{source}.json").write_text(json.dumps(config, indent=2) + "\n")
     local_schema = {
-        table: [column for column, _ in TPCH_COLUMNS[table]]
+        table: [column for column, _ in columns_by_table[table]]
         for table in sorted(coordinator_tables)
     }
     local = {"type": "MANUAL", "dialect": "postgres", "schema": local_schema}
@@ -466,12 +472,13 @@ def load_coordinator_tables(
     database_path: Path,
     coordinator_tables: set[str],
     data_dir: Path,
+    columns_by_table: dict[str, list[tuple[str, str]]],
 ) -> None:
     if not coordinator_tables:
         return
     if not data_dir.is_dir():
         raise SystemExit(
-            f"[accio-coordinator] coordinator TPC-H data directory does not exist: {data_dir}"
+            f"[accio-coordinator] coordinator data directory does not exist: {data_dir}"
         )
 
     with duckdb.connect(str(database_path)) as connection:
@@ -480,7 +487,7 @@ def load_coordinator_tables(
             if not input_file.is_file():
                 raise SystemExit(f"[accio-coordinator] missing coordinator data file: {input_file}")
             print(f"[accio-coordinator] loading local DuckDB table {table}", flush=True)
-            columns = TPCH_COLUMNS[table]
+            columns = columns_by_table[table]
             with input_file.open("rb") as input_stream:
                 first_row = input_stream.readline().rstrip(b"\r\n")
             if not first_row:
@@ -552,23 +559,44 @@ def prepare_workload(
 
 
 def main() -> None:
-    placement = env("TPCH_PLACEMENT", "v1")
-    scale = env("TPCH_SCALE", "1")
+    dataset = env("ACCIO_DATASET", "tpch").lower()
+    if dataset not in DATASET_COLUMNS:
+        raise SystemExit("[accio-coordinator] ACCIO_DATASET must be tpch or job")
+    placement = os.environ.get(
+        "ACCIO_DATASET_VARIANT", os.environ.get("TPCH_PLACEMENT", "v1")
+    ).strip()
+    dataset_signature = (
+        env("TPCH_SCALE", "1")
+        if dataset == "tpch"
+        else env("ACCIO_DATASET_VERSION", "job")
+    )
+    columns_by_table = DATASET_COLUMNS[dataset]
+    all_tables = set(columns_by_table)
     sources = configured_sources()
-    tables = configured_tables(placement, sources)
-    configs = {source: source_config(source) for source in sources}
+    tables = configured_tables(dataset, placement, sources)
+    configs = {source: source_config(source, dataset) for source in sources}
     timeout = int(env("STARTUP_TIMEOUT_SECONDS", "7200"))
 
     for source in sources:
-        wait_for_source(source, configs[source], tables[source], placement, scale, timeout)
+        wait_for_source(
+            source,
+            configs[source],
+            tables[source],
+            placement,
+            dataset_signature,
+            all_tables,
+            timeout,
+        )
 
     config_dir = Path(env("ACCIO_CONFIG_DIR", "/experiment/config"))
     results_dir = Path(env("RESULTS_DIR", "/experiment/results"))
     results_dir.mkdir(parents=True, exist_ok=True)
-    write_configs(config_dir, configs, tables["coordinator"])
+    write_configs(config_dir, configs, tables["coordinator"], columns_by_table)
 
     workload_value = os.environ.get("WORKLOAD_DIR", "").strip()
-    source_workload = Path(workload_value or f"/opt/accio/workload/tpch2_{placement}")
+    source_workload = Path(
+        workload_value or f"/opt/accio/workload/{'tpch2' if dataset == 'tpch' else 'job2'}_{placement}"
+    )
     workload = prepare_workload(
         source_workload,
         Path("/experiment/workload"),
@@ -581,7 +609,8 @@ def main() -> None:
         raise SystemExit(f"[accio-coordinator] query does not exist: {workload / f'{query}.sql'}")
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_name = f"tpch-sf{scale}-{placement}-{query or 'all'}-{timestamp}"
+    dataset_label = f"tpch-sf{dataset_signature}" if dataset == "tpch" else dataset
+    run_name = f"{dataset_label}-{placement}-{query or 'all'}-{timestamp}"
     work_dir = Path("/tmp/accio-runs") / run_name
     database_path = work_dir / "run.duckdb"
     log_path = results_dir / f"{run_name}.log"
@@ -591,7 +620,13 @@ def main() -> None:
         load_coordinator_tables(
             database_path,
             tables["coordinator"],
-            Path(env("TPCH_DATA_MOUNT", "/tpch-data")),
+            Path(
+                os.environ.get(
+                    "ACCIO_DATA_MOUNT",
+                    os.environ.get("TPCH_DATA_MOUNT", "/benchmark-data"),
+                )
+            ),
+            columns_by_table,
         )
         command = [
             sys.executable,

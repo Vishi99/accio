@@ -3,8 +3,12 @@
 set -Eeuo pipefail
 
 readonly ALL_TPCH_TABLES="region nation supplier customer part partsupp orders lineitem"
-readonly SOURCE_ID="${TPCH_SOURCE_ID:-}"
-readonly DATA_DIR="${TPCH_DATA_MOUNT:-/tpch-data}"
+readonly ALL_JOB_TABLES="aka_name aka_title cast_info char_name comp_cast_type company_name company_type complete_cast info_type keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link name person_info role_type title"
+readonly DATASET="${ACCIO_DATASET:-tpch}"
+readonly SOURCE_ID="${ACCIO_SOURCE_ID:-${TPCH_SOURCE_ID:-}}"
+readonly DATA_DIR="${ACCIO_DATA_MOUNT:-${TPCH_DATA_MOUNT:-/benchmark-data}}"
+readonly PLACEMENT="${ACCIO_DATASET_VARIANT:-${TPCH_PLACEMENT:-v1}}"
+readonly DATASET_SIGNATURE="$([ "$DATASET" = tpch ] && printf '%s' "${TPCH_SCALE:-1}" || printf '%s' "${ACCIO_DATASET_VERSION:-job}")"
 
 log() {
     printf '[accio-postgres:%s] %s\n' "${SOURCE_ID:-unconfigured}" "$*"
@@ -15,29 +19,40 @@ die() {
     exit 1
 }
 
-# The legacy run_docker_experiments.sh loads tables after startup. In that mode
-# TPCH_SOURCE_ID is deliberately absent, so this init hook must remain a no-op.
+# The legacy runner loads tables after startup. In that mode the source id is
+# deliberately absent, so this init hook must remain a no-op.
 if [ -z "$SOURCE_ID" ]; then
-    log "TPCH_SOURCE_ID is not set; skipping automatic TPC-H initialization"
+    log "ACCIO_SOURCE_ID is not set; skipping automatic initialization"
     exit 0
 fi
 
 if ! [[ "$SOURCE_ID" =~ ^[a-z][a-z0-9_]*$ ]]; then
-    die "TPCH_SOURCE_ID must be a lowercase identifier (got: $SOURCE_ID)"
+    die "ACCIO_SOURCE_ID must be a lowercase identifier (got: $SOURCE_ID)"
 fi
 
+case "$DATASET" in
+    tpch|job) ;;
+    *) die "ACCIO_DATASET must be tpch or job (got: $DATASET)" ;;
+esac
+
 standard_tables() {
-    case "${TPCH_PLACEMENT:-v1}" in
+    case "$PLACEMENT" in
         v0|v1|v2) ;;
-        *) die "TPCH_PLACEMENT must be v0, v1, or v2" ;;
+        *) die "ACCIO_DATASET_VARIANT must be v0, v1, or v2" ;;
     esac
-    case "${TPCH_PLACEMENT:-v1}:${SOURCE_ID}" in
-        v0:db1) printf '%s\n' "region nation supplier customer orders lineitem" ;;
-        v0:db2) printf '%s\n' "part partsupp" ;;
-        v1:db1) printf '%s\n' "region nation supplier customer part partsupp" ;;
-        v1:db2) printf '%s\n' "orders lineitem" ;;
-        v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
-        v2:db2) printf '%s\n' "region nation supplier customer" ;;
+    case "${DATASET}:${PLACEMENT}:${SOURCE_ID}" in
+        tpch:v0:db1) printf '%s\n' "region nation supplier customer orders lineitem" ;;
+        tpch:v0:db2) printf '%s\n' "part partsupp" ;;
+        tpch:v1:db1) printf '%s\n' "region nation supplier customer part partsupp" ;;
+        tpch:v1:db2) printf '%s\n' "orders lineitem" ;;
+        tpch:v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
+        tpch:v2:db2) printf '%s\n' "region nation supplier customer" ;;
+        job:v0:db1) printf '%s\n' "aka_name cast_info char_name comp_cast_type complete_cast info_type link_type movie_info movie_info_idx movie_link name person_info role_type title" ;;
+        job:v0:db2) printf '%s\n' "aka_title company_name company_type keyword kind_type movie_companies movie_keyword" ;;
+        job:v1:db1) printf '%s\n' "aka_name aka_title comp_cast_type company_name company_type complete_cast keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link title" ;;
+        job:v1:db2) printf '%s\n' "cast_info char_name info_type name person_info role_type" ;;
+        job:v2:db1) printf '%s\n' "comp_cast_type complete_cast link_type movie_info movie_info_idx movie_link title" ;;
+        job:v2:db2) printf '%s\n' "aka_name aka_title cast_info char_name company_name company_type info_type keyword kind_type movie_companies movie_keyword name person_info role_type" ;;
         *) printf '%s\n' "" ;;
     esac
 }
@@ -45,7 +60,7 @@ standard_tables() {
 default_tables() {
     local table
     for table in $(standard_tables); do
-        case " ${TPCH_TABLES_COORDINATOR:-} " in
+        case " ${ACCIO_TABLES_COORDINATOR:-${TPCH_TABLES_COORDINATOR:-}} " in
             *" $table "*) ;;
             *) printf '%s\n' "$table" ;;
         esac
@@ -53,10 +68,12 @@ default_tables() {
 }
 
 configured_tables() {
-    local prefix variable override
+    local prefix variable legacy_variable override
     prefix="$(printf '%s' "$SOURCE_ID" | tr '[:lower:]' '[:upper:]')"
-    variable="TPCH_TABLES_${prefix}"
+    variable="ACCIO_TABLES_${prefix}"
+    legacy_variable="TPCH_TABLES_${prefix}"
     override="${!variable:-}"
+    [ -n "$override" ] || override="${!legacy_variable:-}"
 
     if [ -n "$override" ]; then
         printf '%s\n' "$override"
@@ -80,7 +97,9 @@ table_ddl() {
 }
 
 is_known_table() {
-    case " $ALL_TPCH_TABLES " in
+    local known_tables="$ALL_TPCH_TABLES"
+    [ "$DATASET" = job ] && known_tables="$ALL_JOB_TABLES"
+    case " $known_tables " in
         *" $1 "*) return 0 ;;
         *) return 1 ;;
     esac
@@ -101,21 +120,70 @@ load_table() {
         --command "COPY ${table} FROM STDIN WITH (FORMAT csv, DELIMITER '|');"
 }
 
+job_files() {
+    local table="$1" root file
+    for root in "$DATA_DIR" "$DATA_DIR/csv"; do
+        file="$root/$table.csv"
+        if [ -r "$file" ]; then
+            printf '%s\n' "$file"
+            return
+        fi
+        if [ -d "$root/$table" ]; then
+            find "$root/$table" -maxdepth 1 -type f -name '*.csv' -print | sort
+            return
+        fi
+    done
+}
+
+prepare_job_schema() {
+    local table tables="$1"
+    psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+        --file /opt/accio/job-schema.sql
+    for table in $ALL_JOB_TABLES; do
+        case " $tables " in
+            *" $table "*) ;;
+            *) psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+                --command "DROP TABLE \"$table\"" >/dev/null ;;
+        esac
+    done
+}
+
+load_job_table() {
+    local table="$1" file found=false
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        found=true
+        log "loading $table from $file"
+        psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+            --command "COPY \"$table\" FROM STDIN WITH (FORMAT csv, DELIMITER ',', QUOTE '\"', ESCAPE E'\\\\', NULL '')" \
+            < "$file"
+    done < <(job_files "$table")
+    [ "$found" = true ] || die "Missing $table.csv or $table/*.csv under $DATA_DIR or $DATA_DIR/csv"
+}
+
 tables="$(configured_tables)"
 case "${DB_STATS_TARGET:-100}" in
     ''|0|*[!0-9]*) die "DB_STATS_TARGET must be a positive integer" ;;
 esac
 
+if [ "$DATASET" = job ]; then
+    prepare_job_schema "$tables"
+fi
+
 for table in $tables; do
-    is_known_table "$table" || die "Invalid table '$table'; valid tables: $ALL_TPCH_TABLES"
-    load_table "$table"
+    is_known_table "$table" || die "Invalid $DATASET table '$table'"
+    if [ "$DATASET" = job ]; then
+        load_job_table "$table"
+    else
+        load_table "$table"
+    fi
 done
 
 psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-    --set "placement=${TPCH_PLACEMENT:-custom}" \
+    --set "placement=$PLACEMENT" \
     --set "source_id=$SOURCE_ID" \
     --set "table_list=$tables" \
-    --set "scale=${TPCH_SCALE:-unknown}" \
+    --set "scale=$DATASET_SIGNATURE" \
     --set "stats_target=${DB_STATS_TARGET:-100}" <<'SQL'
 SELECT setseed(1.0 / 42.0);
 SET default_statistics_target = :stats_target;
@@ -135,4 +203,4 @@ ALTER TABLE accio_dataset_metadata SET (autovacuum_enabled = off);
 COMMIT;
 SQL
 
-log "TPC-H initialization complete: $tables"
+log "$DATASET initialization complete: $tables"

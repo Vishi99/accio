@@ -9,3 +9,4 @@ rewriter/target
 **/*.pyc
 accio_technical_report.pdf
 docker/experiment.env
+docker/job.env

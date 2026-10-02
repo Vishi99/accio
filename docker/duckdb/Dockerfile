@@ -9,6 +9,7 @@ RUN apt-get update \
     && python -c "import duckdb; connection = duckdb.connect(); connection.execute('INSTALL quack'); connection.close()"
 
 COPY docker/duckdb/serve.py /usr/local/bin/serve-duckdb
+COPY docker/dataset_catalog.py /usr/local/bin/dataset_catalog.py
 
 EXPOSE 9494
 CMD ["python", "/usr/local/bin/serve-duckdb"]

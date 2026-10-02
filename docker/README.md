@@ -1,27 +1,29 @@
 # Docker experiments: DuckDB coordinator + mixed data sources
 
-The default deployment runs one Accio/DuckDB coordinator, two PostgreSQL
-sources, one DuckDB source served through Quack, and one DataFusion source
-served through PGWire. It supports both:
+The deployment supports TPC-H and JOB with an Accio/DuckDB coordinator,
+PostgreSQL sources, a DuckDB source served through Quack, and a DataFusion
+source served through PGWire. It supports both:
 
 - Docker Compose on one machine, for development and smoke tests.
 - Docker Swarm on five machines, with each service pinned to a labeled node.
 
-PostgreSQL and DuckDB load their assigned TPC-H `.tbl` files when their data
-volumes are first created. DataFusion registers its assigned files directly
-through DataFusion's CSV API on every container start and does not copy them. The coordinator waits
-for all sources, validates their assigned tables, writes the Accio source
-configs, and runs the selected `tpch2_v*` workload.
+PostgreSQL and DuckDB load their assigned TPC-H `.tbl` or JOB `.csv` files when
+their data volumes are first created. DataFusion registers its assigned files
+directly through DataFusion's CSV API on every container start and does not copy
+them. The coordinator waits for all sources, validates their assigned tables,
+writes the Accio source configs, and runs the selected `tpch2_v*` or `job2_v*`
+workload.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `docker-compose.multinode.yml` | Five-service Compose/Swarm topology |
-| `docker/experiment.env.example` | All experiment, TPC-H, resource, and cost settings |
+| `docker/experiment.env.example` | TPC-H experiment, resource, and cost settings |
+| `docker/job.env.example` | Four-container JOB example: coordinator plus three heterogeneous sources |
 | `docker/coordinator/Dockerfile` | Accio, DuckDB, custom PostgreSQL scanner, and rewriter image |
 | `docker/coordinator/Dockerfile.mixed` | Modern DuckDB coordinator with PostgreSQL and Quack extensions |
-| `docker/postgres/Dockerfile` | PostgreSQL image with TPC-H loader and optional `netem` support |
+| `docker/postgres/Dockerfile` | PostgreSQL image with TPC-H/JOB loaders and optional `netem` support |
 | `docker/duckdb/Dockerfile` | DuckDB source served over Quack |
 | `docker/datafusion/Dockerfile` | DataFusion source served by `datafusion-postgres` PGWire |
 | `generate_tpch_data.sh` | Clone, build, and run TPC-H dbgen |
@@ -194,6 +196,48 @@ logs directly without `docker cp`:
 ls -lt /absolute/path/to/accio-results
 less /absolute/path/to/accio-results/tpch-sf1-v1-all-TIMESTAMP.log
 ```
+
+## Local four-container JOB quick start
+
+The JOB data root may contain `<table>.csv` files directly or a `csv/`
+subdirectory. Large tables may be split into `csv/<table>/*.csv`. The standard
+JOB schema contains 21 tables and the checked-in workload uses query names such
+as `q01a` and `q33c`.
+
+Create a JOB configuration and replace the absolute paths:
+
+```bash
+cp docker/job.env.example docker/job.env
+$EDITOR docker/job.env
+mkdir -p /absolute/path/to/accio/accio-results
+```
+
+The example starts exactly these services:
+
+```text
+coordinator  postgres1  duckdb3  datafusion4
+```
+
+Validate, build, and create fresh source databases:
+
+```bash
+ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh config
+ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh build
+ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh fresh
+ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh logs
+```
+
+`fresh` is required for the first JOB load and after changing the table
+distribution. A query-only rerun reuses the PostgreSQL and DuckDB volumes:
+
+```bash
+ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh rerun
+```
+
+Set `ACCIO_QUERY=q01a` for one query or leave it empty to run every `q*.sql`
+file in `workload/job2_${ACCIO_DATASET_VARIANT}`. The example distribution is
+configured entirely by `ACCIO_TABLES_DB1`, `ACCIO_TABLES_DB3`, and
+`ACCIO_TABLES_DB4`; every JOB table must occur exactly once.
 
 ## Five-host Docker Swarm setup
 

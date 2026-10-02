@@ -7,6 +7,7 @@ RUN apt-get update \
 
 COPY docker/postgres/entrypoint.sh /usr/local/bin/accio-postgres-entrypoint
 COPY docker/postgres/docker-entrypoint-initdb.d/10-load-tpch.sh /docker-entrypoint-initdb.d/10-load-tpch.sh
+COPY docker/postgres/job-schema.sql /opt/accio/job-schema.sql
 
 RUN chmod 0755 \
     /usr/local/bin/accio-postgres-entrypoint \

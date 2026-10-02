@@ -8,7 +8,7 @@ ENV_FILE="${ACCIO_ENV_FILE:-${SCRIPT_DIR}/docker/experiment.env}"
 
 usage() {
     cat <<'EOF'
-Deploy a DuckDB/Accio coordinator with environment-configured TPC-H sources.
+Deploy a DuckDB/Accio coordinator with environment-configured benchmark sources.
 
 Usage:
   cp docker/experiment.env.example docker/experiment.env
@@ -55,14 +55,15 @@ load_environment() {
     set +a
 
     DEPLOY_MODE="${DEPLOY_MODE:-compose}"
-    STACK_NAME="${STACK_NAME:-accio-tpch}"
+    ACCIO_DATASET="${ACCIO_DATASET:-tpch}"
+    STACK_NAME="${STACK_NAME:-accio-${ACCIO_DATASET}}"
     case "$DEPLOY_MODE" in
         compose) NETWORK_DRIVER="${NETWORK_DRIVER:-bridge}" ;;
         swarm) NETWORK_DRIVER=overlay ;;
         *) die "DEPLOY_MODE must be compose or swarm (got: $DEPLOY_MODE)" ;;
     esac
     ACCIO_ENV_FILE="$ENV_FILE"
-    export DEPLOY_MODE STACK_NAME NETWORK_DRIVER ACCIO_ENV_FILE
+    export DEPLOY_MODE STACK_NAME NETWORK_DRIVER ACCIO_ENV_FILE ACCIO_DATASET
 }
 
 require_docker() {
@@ -109,12 +110,22 @@ source_service() {
 }
 
 validate_table_distribution() {
-    local coordinator_tables="${TPCH_TABLES_COORDINATOR:-}"
+    local coordinator_tables="${ACCIO_TABLES_COORDINATOR:-${TPCH_TABLES_COORDINATOR:-}}"
+    local known_tables
+    case "$ACCIO_DATASET" in
+        tpch) known_tables="region nation supplier customer part partsupp orders lineitem" ;;
+        job) known_tables="aka_name aka_title cast_info char_name comp_cast_type company_name company_type complete_cast info_type keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link name person_info role_type title" ;;
+        *) die "ACCIO_DATASET must be tpch or job" ;;
+    esac
+
+    if [ "$ACCIO_DATASET" = job ] && [ -n "$coordinator_tables" ]; then
+        die "Coordinator-resident JOB tables are not supported"
+    fi
 
     local seen=" "
     local source table tables
     for table in $coordinator_tables; do
-        case " region nation supplier customer part partsupp orders lineitem " in
+        case " $known_tables " in
             *" $table "*) ;;
             *) die "Unknown table in custom distribution: $table" ;;
         esac
@@ -127,7 +138,7 @@ validate_table_distribution() {
     for source in $(sources); do
         tables="$(configured_tables_for "$source")"
         for table in $tables; do
-            case " region nation supplier customer part partsupp orders lineitem " in
+            case " $known_tables " in
                 *" $table "*) ;;
                 *) die "Unknown table in custom distribution: $table" ;;
             esac
@@ -137,7 +148,7 @@ validate_table_distribution() {
             esac
         done
     done
-    for table in region nation supplier customer part partsupp orders lineitem; do
+    for table in $known_tables; do
         case "$seen" in
             *" $table "*) ;;
             *) die "Table is missing from custom distribution: $table" ;;
@@ -146,13 +157,20 @@ validate_table_distribution() {
 }
 
 default_source_tables() {
-    case "${TPCH_PLACEMENT}:${1}" in
-        v0:db1) printf '%s\n' "region nation supplier customer orders lineitem" ;;
-        v0:db2) printf '%s\n' "part partsupp" ;;
-        v1:db1) printf '%s\n' "region nation supplier customer part partsupp" ;;
-        v1:db2) printf '%s\n' "orders lineitem" ;;
-        v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
-        v2:db2) printf '%s\n' "region nation supplier customer" ;;
+    local placement="${ACCIO_DATASET_VARIANT:-${TPCH_PLACEMENT:-v1}}"
+    case "${ACCIO_DATASET}:${placement}:${1}" in
+        tpch:v0:db1) printf '%s\n' "region nation supplier customer orders lineitem" ;;
+        tpch:v0:db2) printf '%s\n' "part partsupp" ;;
+        tpch:v1:db1) printf '%s\n' "region nation supplier customer part partsupp" ;;
+        tpch:v1:db2) printf '%s\n' "orders lineitem" ;;
+        tpch:v2:db1) printf '%s\n' "part partsupp orders lineitem" ;;
+        tpch:v2:db2) printf '%s\n' "region nation supplier customer" ;;
+        job:v0:db1) printf '%s\n' "aka_name cast_info char_name comp_cast_type complete_cast info_type link_type movie_info movie_info_idx movie_link name person_info role_type title" ;;
+        job:v0:db2) printf '%s\n' "aka_title company_name company_type keyword kind_type movie_companies movie_keyword" ;;
+        job:v1:db1) printf '%s\n' "aka_name aka_title comp_cast_type company_name company_type complete_cast keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link title" ;;
+        job:v1:db2) printf '%s\n' "cast_info char_name info_type name person_info role_type" ;;
+        job:v2:db1) printf '%s\n' "comp_cast_type complete_cast link_type movie_info movie_info_idx movie_link title" ;;
+        job:v2:db2) printf '%s\n' "aka_name aka_title cast_info char_name company_name company_type info_type keyword kind_type movie_companies movie_keyword name person_info role_type" ;;
         *) printf '%s\n' "" ;;
     esac
 }
@@ -162,52 +180,88 @@ configured_tables_for() {
     local override="" variable prefix
     local table
     if [ "$target" = coordinator ]; then
-        printf '%s\n' "${TPCH_TABLES_COORDINATOR:-}"
+        printf '%s\n' "${ACCIO_TABLES_COORDINATOR:-${TPCH_TABLES_COORDINATOR:-}}"
         return
     fi
     prefix="$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')"
-    variable="TPCH_TABLES_${prefix}"
+    variable="ACCIO_TABLES_${prefix}"
     override="${!variable:-}"
+    if [ -z "$override" ]; then
+        variable="TPCH_TABLES_${prefix}"
+        override="${!variable:-}"
+    fi
     if [ -n "$override" ]; then
         printf '%s\n' "$override"
         return
     fi
     for table in $(default_source_tables "$target"); do
-        case " ${TPCH_TABLES_COORDINATOR:-} " in
+        case " ${ACCIO_TABLES_COORDINATOR:-${TPCH_TABLES_COORDINATOR:-}} " in
             *" $table "*) ;;
             *) printf '%s\n' "$table" ;;
         esac
     done
 }
 
-validate_compose_data_files() {
-    local target data_dir table variable prefix
-    for target in $(sources) coordinator; do
-        if [ "$target" = coordinator ]; then
-            data_dir="$TPCH_DATA_DIR_COORDINATOR"
-        else
-            prefix="$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')"
-            variable="TPCH_DATA_DIR_${prefix}"
-            data_dir="${!variable:-}"
+data_dir_for() {
+    local target="$1" prefix variable value
+    if [ "$target" = coordinator ]; then
+        printf '%s\n' "${ACCIO_DATA_DIR_COORDINATOR:-${TPCH_DATA_DIR_COORDINATOR:-}}"
+        return
+    fi
+    prefix="$(printf '%s' "$target" | tr '[:lower:]' '[:upper:]')"
+    variable="ACCIO_DATA_DIR_${prefix}"
+    value="${!variable:-}"
+    if [ -z "$value" ]; then
+        variable="TPCH_DATA_DIR_${prefix}"
+        value="${!variable:-}"
+    fi
+    printf '%s\n' "$value"
+}
+
+job_table_data_exists() {
+    local data_dir="$1" table="$2" root
+    for root in "$data_dir" "$data_dir/csv"; do
+        [ -s "$root/$table.csv" ] && return 0
+        if [ -d "$root/$table" ] && find "$root/$table" -maxdepth 1 -type f -name '*.csv' -size +0c -print -quit | grep -q .; then
+            return 0
         fi
-        [ -d "$data_dir" ] || die "TPC-H data directory for $target does not exist: $data_dir"
+    done
+    return 1
+}
+
+validate_compose_data_files() {
+    local target data_dir table
+    for target in $(sources) coordinator; do
+        data_dir="$(data_dir_for "$target")"
+        [ -d "$data_dir" ] || die "$ACCIO_DATASET data directory for $target does not exist: $data_dir"
         for table in $(configured_tables_for "$target"); do
-            [ -s "$data_dir/$table.tbl" ] || \
-                die "Missing $data_dir/$table.tbl required by $target"
+            if [ "$ACCIO_DATASET" = job ]; then
+                job_table_data_exists "$data_dir" "$table" || \
+                    die "Missing $table.csv or $table/*.csv under $data_dir or $data_dir/csv"
+            else
+                [ -s "$data_dir/$table.tbl" ] || \
+                    die "Missing $data_dir/$table.tbl required by $target"
+            fi
         done
     done
 }
 
 validate_inputs() {
-    case "${TPCH_PLACEMENT:-}" in
+    case "${ACCIO_DATASET:-}" in
+        tpch|job) ;;
+        *) die "ACCIO_DATASET must be tpch or job" ;;
+    esac
+    case "${ACCIO_DATASET_VARIANT:-${TPCH_PLACEMENT:-}}" in
         v0|v1|v2) ;;
-        *) die "TPCH_PLACEMENT must be v0, v1, or v2" ;;
+        *) die "ACCIO_DATASET_VARIANT must be v0, v1, or v2" ;;
     esac
-    case "${TPCH_SCALE:-}" in
-        1|10|50) ;;
-        *) die "TPCH_SCALE must be 1, 10, or 50" ;;
-    esac
-    [ -n "${TPCH_DATA_DIR_COORDINATOR:-}" ] || die "TPCH_DATA_DIR_COORDINATOR must be set"
+    if [ "$ACCIO_DATASET" = tpch ]; then
+        case "${TPCH_SCALE:-}" in
+            1|10|50) ;;
+            *) die "TPCH_SCALE must be 1, 10, or 50" ;;
+        esac
+    fi
+    [ -n "$(data_dir_for coordinator)" ] || die "ACCIO_DATA_DIR_COORDINATOR must be set"
     [ -n "${ACCIO_RESULTS_DIR:-}" ] || die "ACCIO_RESULTS_DIR must be set"
     local source type data_dir variable prefix token seen_sources=" "
     for source in $(sources); do
@@ -220,8 +274,8 @@ validate_inputs() {
         esac
         type="$(source_type "$source")"
         prefix="$(printf '%s' "$source" | tr '[:lower:]' '[:upper:]')"
-        variable="TPCH_DATA_DIR_${prefix}"
-        data_dir="${!variable:-}"
+        variable="ACCIO_DATA_DIR_${prefix}"
+        data_dir="$(data_dir_for "$source")"
         [ -n "$data_dir" ] || die "$variable must be set"
         case "$data_dir" in /*) ;; *) die "$variable must be an absolute path" ;; esac
         case "$type" in
@@ -235,9 +289,9 @@ validate_inputs() {
             *) die "${prefix}_TYPE must be POSTGRES, DUCKDB, QUACK, or DATAFUSION (got: $type)" ;;
         esac
     done
-    case "$TPCH_DATA_DIR_COORDINATOR" in
+    case "$(data_dir_for coordinator)" in
         /*) ;;
-        *) die "TPCH_DATA_DIR_COORDINATOR must be an absolute path" ;;
+        *) die "ACCIO_DATA_DIR_COORDINATOR must be an absolute path" ;;
     esac
     case "$ACCIO_RESULTS_DIR" in
         /*) ;;
@@ -320,7 +374,12 @@ deploy() {
     require_docker
     validate_inputs
     if [ "$DEPLOY_MODE" = "compose" ]; then
-        compose up --detach
+        local source
+        local -a services=()
+        for source in $(sources); do
+            services+=("$(source_service "$source")")
+        done
+        compose up --detach "${services[@]}" coordinator
     else
         [ "$(docker info --format '{{.Swarm.ControlAvailable}}')" = true ] || \
             die "This Docker daemon is not an active Swarm manager"

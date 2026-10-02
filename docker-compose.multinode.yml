@@ -20,7 +20,9 @@ x-postgres-common: &postgres-common
   environment: &postgres-environment
     POSTGRES_USER: ${POSTGRES_USER:-postgres}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the experiment env file}
-    POSTGRES_DB: tpch${TPCH_SCALE:-1}
+    ACCIO_DATASET: ${ACCIO_DATASET:-tpch}
+    ACCIO_DATASET_VARIANT: ${ACCIO_DATASET_VARIANT:-${TPCH_PLACEMENT:-v1}}
+    ACCIO_DATA_MOUNT: /benchmark-data
     TPCH_SCALE: ${TPCH_SCALE:-1}
     TPCH_PLACEMENT: ${TPCH_PLACEMENT:-v1}
     TPCH_TABLES_COORDINATOR: ${TPCH_TABLES_COORDINATOR:-}
@@ -51,12 +53,14 @@ services:
     hostname: postgres1
     environment:
       <<: *postgres-environment
+      POSTGRES_DB: ${DB1_DATABASE:-tpch${TPCH_SCALE:-1}}
+      ACCIO_SOURCE_ID: db1
       TPCH_SOURCE_ID: db1
     volumes:
       - postgres1-data:/var/lib/postgresql/data
       - type: bind
-        source: ${TPCH_DATA_DIR_DB1:?set TPCH_DATA_DIR_DB1 to an absolute path on the postgres1 node}
-        target: /tpch-data
+        source: ${ACCIO_DATA_DIR_DB1:-${TPCH_DATA_DIR_DB1:-.}}
+        target: /benchmark-data
         read_only: true
     deploy:
       placement:
@@ -70,12 +74,14 @@ services:
     hostname: postgres2
     environment:
       <<: *postgres-environment
+      POSTGRES_DB: ${DB2_DATABASE:-tpch${TPCH_SCALE:-1}}
+      ACCIO_SOURCE_ID: db2
       TPCH_SOURCE_ID: db2
     volumes:
       - postgres2-data:/var/lib/postgresql/data
       - type: bind
-        source: ${TPCH_DATA_DIR_DB2:?set TPCH_DATA_DIR_DB2 to an absolute path on the postgres2 node}
-        target: /tpch-data
+        source: ${ACCIO_DATA_DIR_DB2:-${TPCH_DATA_DIR_DB2:-.}}
+        target: /benchmark-data
         read_only: true
     deploy:
       placement:
@@ -99,14 +105,15 @@ services:
     env_file:
       - ${ACCIO_ENV_FILE:-docker/experiment.env}
     environment:
+      ACCIO_SOURCE_ID: db3
+      ACCIO_DATA_MOUNT: /benchmark-data
       TPCH_SOURCE_ID: db3
-      TPCH_DATA_MOUNT: /tpch-data
-      DUCKDB_DATABASE: /var/lib/duckdb/tpch.duckdb
+      DUCKDB_DATABASE: /var/lib/duckdb/${ACCIO_DATASET:-tpch}.duckdb
     volumes:
       - duckdb3-data:/var/lib/duckdb
       - type: bind
-        source: ${TPCH_DATA_DIR_DB3:?set TPCH_DATA_DIR_DB3 to an absolute path on the duckdb3 node}
-        target: /tpch-data
+        source: ${ACCIO_DATA_DIR_DB3:-${TPCH_DATA_DIR_DB3:-.}}
+        target: /benchmark-data
         read_only: true
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 9494), 2).close()"]
@@ -135,13 +142,14 @@ services:
     env_file:
       - ${ACCIO_ENV_FILE:-docker/experiment.env}
     environment:
+      ACCIO_SOURCE_ID: db4
+      ACCIO_DATA_MOUNT: /benchmark-data
       TPCH_SOURCE_ID: db4
-      TPCH_DATA_MOUNT: /tpch-data
       DATAFUSION_DATABASE: ${DB4_DATABASE:-postgres}
     volumes:
       - type: bind
-        source: ${TPCH_DATA_DIR_DB4:?set TPCH_DATA_DIR_DB4 to an absolute path on the datafusion4 node}
-        target: /tpch-data
+        source: ${ACCIO_DATA_DIR_DB4:-${TPCH_DATA_DIR_DB4:-.}}
+        target: /benchmark-data
         read_only: true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U postgres -d $${DATAFUSION_DATABASE:-postgres}"]
@@ -170,22 +178,17 @@ services:
     command: ["python", "/opt/accio/docker/coordinator/run_experiment.py"]
     networks:
       - experiment
-    depends_on:
-      - postgres1
-      - postgres2
-      - duckdb3
-      - datafusion4
     env_file:
       - ${ACCIO_ENV_FILE:-docker/experiment.env}
     environment:
-      TPCH_DATA_MOUNT: /tpch-data
+      ACCIO_DATA_MOUNT: /benchmark-data
     volumes:
       - type: bind
         source: ${ACCIO_RESULTS_DIR:?set ACCIO_RESULTS_DIR to an absolute host path for result logs}
         target: /experiment/results
       - type: bind
-        source: ${TPCH_DATA_DIR_COORDINATOR:?set TPCH_DATA_DIR_COORDINATOR to an absolute path on the coordinator node}
-        target: /tpch-data
+        source: ${ACCIO_DATA_DIR_COORDINATOR:-${TPCH_DATA_DIR_COORDINATOR:-.}}
+        target: /benchmark-data
         read_only: true
     deploy:
       placement:

@@ -6,4 +6,6 @@ docker/datafusion/server/target
 rewriter/src/test/
 .accio-docker/
 docker/experiment.env
+docker/job.env
 accio-results/
+tmp/
