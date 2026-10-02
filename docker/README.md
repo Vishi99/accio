@@ -180,7 +180,11 @@ without reloading persistent source data with:
 
 ```bash
 ./run_multinode_experiments.sh rerun
+./run_multinode_experiments.sh logs
 ```
+
+`rerun` replaces the previous coordinator container, so `logs` follows only the
+new run rather than retaining output from the prior coordinator.
 
 Inspect or stop the deployment with:
 
@@ -244,6 +248,7 @@ distribution. A query-only rerun reuses the PostgreSQL and DuckDB volumes:
 
 ```bash
 ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh rerun
+ACCIO_ENV_FILE="$PWD/docker/job.env" ./run_multinode_experiments.sh logs
 ```
 
 Set `ACCIO_QUERY=q01a` for one query or leave it empty to run every `q*.sql`

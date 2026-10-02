@@ -448,7 +448,8 @@ logs() {
 rerun() {
     require_docker
     if [ "$DEPLOY_MODE" = "compose" ]; then
-        compose run --rm coordinator
+        compose up --detach --no-deps --force-recreate coordinator
+        log "coordinator recreated; use '$0 logs' to follow the experiment"
     else
         docker service update --force "${STACK_NAME}_coordinator" >/dev/null
         log "coordinator resubmitted; use '$0 logs' to follow it"
