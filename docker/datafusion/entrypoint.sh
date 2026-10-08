@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-readonly SOURCE_ID="${TPCH_SOURCE_ID:-}"
+readonly SOURCE_ID="${ACCIO_SOURCE_ID:-${TPCH_SOURCE_ID:-}}"
 
 log() {
     printf '[accio-datafusion:%s] %s\n' "${SOURCE_ID:-unconfigured}" "$*"

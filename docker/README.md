@@ -5,6 +5,7 @@ PostgreSQL sources, a DuckDB source served through Quack, and a DataFusion
 source served through PGWire. It supports both:
 
 - Docker Compose on one machine, for development and smoke tests.
+- Independent Docker containers on physical nodes, without Swarm or a registry.
 - Docker Swarm on five machines, with each service pinned to a labeled node.
 
 PostgreSQL and DuckDB load their assigned TPC-H `.tbl` or JOB `.csv` files when
@@ -21,13 +22,16 @@ workload.
 | `docker-compose.multinode.yml` | Five-service Compose/Swarm topology |
 | `docker/experiment.env.example` | TPC-H experiment, resource, and cost settings |
 | `docker/job.env.example` | Four-container JOB example: coordinator plus three heterogeneous sources |
+| `docker/job.multinode.env.example` | Coordinator settings for the four-node physical JOB deployment |
 | `docker/coordinator/Dockerfile` | Accio, DuckDB, custom PostgreSQL scanner, and rewriter image |
 | `docker/coordinator/Dockerfile.mixed` | Modern DuckDB coordinator with PostgreSQL and Quack extensions |
 | `docker/postgres/Dockerfile` | PostgreSQL image with TPC-H/JOB loaders and optional `netem` support |
 | `docker/duckdb/Dockerfile` | DuckDB source served over Quack |
 | `docker/datafusion/Dockerfile` | DataFusion source served by `datafusion-postgres` PGWire |
 | `generate_tpch_data.sh` | Clone, build, and run TPC-H dbgen |
+| `prepare_job_data.sh` | Download, extract, verify, and permission the JOB IMDb CSV snapshot |
 | `run_multinode_experiments.sh` | Build/deploy/log/status/rerun wrapper |
+| `run_external_experiment.sh` | Run only the coordinator against independently hosted sources |
 | `run_docker_experiments.sh` | Existing imperative single-host runner |
 
 ## Architecture
@@ -52,8 +56,9 @@ workload.
 
 DuckDB is embedded in the coordinator process. `duckdb3` is a separate DuckDB
 process reached over Quack. `datafusion4` runs DataFusion behind a PostgreSQL
-wire-compatible endpoint. Source ports are not published to the host;
-communication stays on the deployment network.
+wire-compatible endpoint. Compose and Swarm keep traffic on their deployment
+network. The physical-node setup publishes each source port on the private
+experiment network.
 
 ## Prerequisites
 
@@ -203,10 +208,27 @@ less /absolute/path/to/accio-results/tpch-sf1-v1-all-TIMESTAMP.log
 
 ## Local four-container JOB quick start
 
-The JOB data root may contain `<table>.csv` files directly or a `csv/`
-subdirectory. Large tables may be split into `csv/<table>/*.csv`. The standard
-JOB schema contains 21 tables and the checked-in workload uses query names such
-as `q01a` and `q33c`.
+Download and prepare the May 2013 IMDb snapshot linked by the
+[Join Order Benchmark](https://github.com/gregrahn/join-order-benchmark):
+
+```bash
+./prepare_job_data.sh
+```
+
+The default output is `data/job`, while the downloaded 1.2 GB archive is cached
+under `.accio-docker/job`. A subsequent invocation reuses a complete prepared
+dataset or the cached archive. To use another output directory:
+
+```bash
+./prepare_job_data.sh /data/benchmarks/job
+```
+
+The script verifies all 21 non-empty CSV files and grants the read/traverse
+permissions required by the source containers. Allow several additional GB of
+free disk for the compressed archive, temporary extraction, and prepared CSVs.
+The loaders also accept an existing data root containing `<table>.csv` files,
+a `csv/` subdirectory, or chunked `csv/<table>/*.csv` files. The checked-in JOB
+workload uses query names such as `q01a` and `q33c`.
 
 Create a JOB configuration and replace the absolute paths:
 
@@ -257,6 +279,219 @@ are already qualified for this three-source placement. The coordinator still
 checks and normalizes those qualifiers against `ACCIO_TABLES_DB1`,
 `ACCIO_TABLES_DB3`, and `ACCIO_TABLES_DB4`; every JOB table must occur exactly
 once.
+
+## Four-node physical JOB setup (no Swarm)
+
+This is the simplest multinode path: each source node runs one independent
+container, and node-0 runs the coordinator with host networking. Docker Swarm,
+SSH automation, and an image registry are not required. The topology is:
+
+| Node | Address | Container | Accio source |
+| --- | --- | --- | --- |
+| node-0 | `10.10.1.1` | Accio/DuckDB coordinator | coordinator |
+| node-1 | `10.10.1.4` | PostgreSQL | `db1` |
+| node-3 | `10.10.1.3` | DuckDB/Quack | `db3` |
+| node-2 | `10.10.1.2` | DataFusion/PGWire | `db4` |
+
+The repository must be present locally on each source node. Download and prepare
+the data independently on node-1, node-3, and node-2, so no manual dataset upload or
+cross-node copy is required:
+
+```bash
+./prepare_job_data.sh
+export JOB_DATA_DIR="$(pwd)/data/job"
+```
+
+Each node downloads the same cached archive but its source container loads or
+registers only its assigned tables. Nodes may instead pass a different absolute
+output directory to `prepare_job_data.sh`; every source mounts its local path at
+`/benchmark-data`.
+
+### Node-1: PostgreSQL (`10.10.1.4`)
+
+Build only the PostgreSQL image on node-1:
+
+```bash
+sudo docker build --tag accio-postgres:latest \
+  --file docker/postgres/Dockerfile .
+```
+
+Create the persistent volume and start the source:
+
+```bash
+sudo docker volume create accio-job-postgres1-data
+sudo docker run -d \
+  --name accio-job-postgres1 \
+  --restart unless-stopped \
+  --shm-size 2g \
+  --publish 5432:5432 \
+  --env ACCIO_DATASET=job \
+  --env ACCIO_DATASET_VERSION=job \
+  --env ACCIO_DATASET_VARIANT=v2 \
+  --env ACCIO_SOURCE_ID=db1 \
+  --env ACCIO_DATA_MOUNT=/benchmark-data \
+  --env "ACCIO_TABLES_DB1=aka_title company_name company_type keyword kind_type movie_companies movie_keyword" \
+  --env POSTGRES_USER=postgres \
+  --env POSTGRES_PASSWORD=postgres \
+  --env POSTGRES_DB=job \
+  --env DB_STATS_TARGET=100 \
+  --env BANDWIDTH=none \
+  --volume accio-job-postgres1-data:/var/lib/postgresql/data \
+  --volume "$JOB_DATA_DIR:/benchmark-data:ro" \
+  accio-postgres:latest \
+  postgres \
+  -c shared_buffers=1GB \
+  -c max_connections=100 \
+  -c max_worker_processes=8 \
+  -c max_parallel_workers=8 \
+  -c max_parallel_workers_per_gather=4
+```
+
+Follow the initial load with:
+
+```bash
+sudo docker logs -f accio-job-postgres1
+```
+
+### Node-3: DuckDB/Quack (`10.10.1.3`)
+
+Build only the DuckDB source image on node-3:
+
+```bash
+sudo docker build --tag accio-duckdb-source:latest \
+  --build-arg DUCKDB_VERSION=1.5.3 \
+  --file docker/duckdb/Dockerfile .
+```
+
+Use the same token here and in the coordinator env file:
+
+```bash
+sudo docker volume create accio-job-duckdb3-data
+sudo docker run -d \
+  --name accio-job-duckdb3 \
+  --restart unless-stopped \
+  --publish 9494:9494 \
+  --env ACCIO_DATASET=job \
+  --env ACCIO_DATASET_VERSION=job \
+  --env ACCIO_DATASET_VARIANT=v2 \
+  --env ACCIO_SOURCE_ID=db3 \
+  --env ACCIO_DATA_MOUNT=/benchmark-data \
+  --env "ACCIO_TABLES_DB3=aka_name cast_info char_name info_type person_info role_type name" \
+  --env DB3_TOKEN=replace-with-a-long-random-token \
+  --env DUCKDB_DATABASE=/var/lib/duckdb/job.duckdb \
+  --env DUCKDB_THREADS=4 \
+  --env DUCKDB_MEMORY=8GB \
+  --env BANDWIDTH=none \
+  --volume accio-job-duckdb3-data:/var/lib/duckdb \
+  --volume "$JOB_DATA_DIR:/benchmark-data:ro" \
+  accio-duckdb-source:latest
+```
+
+Follow the initial load with:
+
+```bash
+sudo docker logs -f accio-job-duckdb3
+```
+
+### Node-2: DataFusion/PGWire (`10.10.1.2`)
+
+Build only the DataFusion source image on node-2:
+
+```bash
+sudo docker build --tag accio-datafusion-source:latest \
+  --file docker/datafusion/Dockerfile .
+```
+
+DataFusion reads the CSV files in place and does not need a data volume:
+
+```bash
+sudo docker run -d \
+  --name accio-job-datafusion4 \
+  --restart unless-stopped \
+  --publish 5432:5432 \
+  --env ACCIO_DATASET=job \
+  --env ACCIO_DATASET_VERSION=job \
+  --env ACCIO_DATASET_VARIANT=v2 \
+  --env ACCIO_SOURCE_ID=db4 \
+  --env ACCIO_DATA_MOUNT=/benchmark-data \
+  --env "ACCIO_TABLES_DB4=complete_cast comp_cast_type link_type title movie_info movie_info_idx movie_link" \
+  --env DATAFUSION_DATABASE=postgres \
+  --env BANDWIDTH=none \
+  --volume "$JOB_DATA_DIR:/benchmark-data:ro" \
+  accio-datafusion-source:latest
+```
+
+Follow registration and server startup with:
+
+```bash
+sudo docker logs -f accio-job-datafusion4
+```
+
+### Node-0: coordinator (`10.10.1.1`)
+
+Build the mixed coordinator image on node-0:
+
+```bash
+sudo docker build --tag accio-mixed-coordinator:latest \
+  --build-arg DUCKDB_VERSION=1.5.3 \
+  --file docker/coordinator/Dockerfile.mixed .
+```
+
+Create its config and update the result directory and Quack token if needed:
+
+```bash
+cp docker/job.multinode.env.example docker/job.multinode.env
+$EDITOR docker/job.multinode.env
+mkdir -p /users/Vishak/accio/accio-results
+```
+
+Check the three network endpoints from node-0:
+
+```bash
+nc -vz 10.10.1.4 5432
+nc -vz 10.10.1.3 9494
+nc -vz 10.10.1.2 5432
+```
+
+Run the selected query in the foreground:
+
+```bash
+sudo env ACCIO_ENV_FILE="$PWD/docker/job.multinode.env" \
+  ./run_external_experiment.sh
+```
+
+The coordinator waits for each source to finish loading. Results and explain
+output are written directly under `ACCIO_RESULTS_DIR`. Change `ACCIO_QUERY` in
+the coordinator env file and run the same command again; source data is reused.
+
+### Resetting physical sources
+
+After changing the JOB data or table placement, reset only the persistent
+source on the corresponding node. These commands permanently remove that
+source's loaded database, but do not modify the mounted JOB CSV files.
+
+PostgreSQL node:
+
+```bash
+sudo docker rm -f accio-job-postgres1
+sudo docker volume rm accio-job-postgres1-data
+```
+
+DuckDB node:
+
+```bash
+sudo docker rm -f accio-job-duckdb3
+sudo docker volume rm accio-job-duckdb3-data
+```
+
+DataFusion is stateless; remove and rerun its `docker run` command:
+
+```bash
+sudo docker rm -f accio-job-datafusion4
+```
+
+No source reset is needed when only `ACCIO_QUERY`, run count, strategy, costs,
+or explain settings change.
 
 ## Five-host Docker Swarm setup
 

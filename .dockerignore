@@ -1,6 +1,7 @@
 .git
 .github
 .accio-docker
+data/job
 accio-results
 artifacts
 spark-warehouse
@@ -10,3 +11,4 @@ rewriter/target
 accio_technical_report.pdf
 docker/experiment.env
 docker/job.env
+docker/job.multinode.env
