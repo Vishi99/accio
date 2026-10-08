@@ -152,7 +152,7 @@ def source_config(source: str, dataset: str) -> dict[str, object]:
             "password": first_env(f"{prefix}_PASSWORD", "POSTGRES_PASSWORD"),
             "costParams": cost_params,
             "cardEstType": "postgres",
-            "partitionType": "postgres",
+            "partitionType": "default",
             "partition": {"max_parallelism": int(env("PG_MAX_PARALLELISM", "8"))},
             "dialect": "postgres",
             "disableOps": [],
