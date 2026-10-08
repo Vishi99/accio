@@ -607,10 +607,13 @@ DB4_PASSWORD=unused
 
 Supported source types are `POSTGRES`, `DUCKDB`/`QUACK`, and `DATAFUSION`.
 DataFusion uses PGWire for transport but Accio's DataFusion dialect for pushed
-SQL. It deliberately uses Accio's generic cardinality estimator and no
-PostgreSQL CTID partitioner. When an engine-specific domain statistic is not
-available, the generic estimator uses Accio's existing 100-row heuristic; it
-does not issue an additional data scan during planning. Because DuckDB's
+SQL. At source startup it scans each assigned file once to collect its row
+count and approximate distinct counts for known join keys. A dedicated
+DataFusion cardinality estimator reads and caches those small statistics over
+PGWire; it does not execute candidate joins during planning. Unknown columns
+fall back to the table row count and then Accio's existing heuristic.
+DataFusion does not use PostgreSQL's system catalogs or CTID partitioner.
+Because DuckDB's
 PostgreSQL extension requires `COPY TO STDOUT`, which the DataFusion PGWire
 server does not implement, the coordinator reads DataFusion results using
 ordinary PGWire rows and materializes them into DuckDB in
@@ -662,8 +665,8 @@ ACCIO_ENV_FILE=docker/experiment.env docker compose \
 
 Replace `orders` if DB4 owns another table. The generated Accio JSON uses the
 PostgreSQL connector only as the execution transport; `dialect=datafusion`
-controls pushed SQL, while generic cardinality and partition implementations
-avoid PostgreSQL-only catalog and CTID assumptions.
+controls pushed SQL, while the DataFusion cardinality estimator and generic
+partition implementation avoid PostgreSQL-only catalog and CTID assumptions.
 
 ### TPC-H scale and distribution
 

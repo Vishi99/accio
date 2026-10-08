@@ -87,6 +87,8 @@ public class FedConvention extends Convention.Impl {
                 cardinalityEstimator = new MysqlCardinalityEstimator();
             } else if (type.equals("DUCKDB")) {
                 cardinalityEstimator = new DuckdbCardinalityEstimator();
+            } else if (type.equals("DATAFUSION")) {
+                cardinalityEstimator = new DataFusionCardinalityEstimator();
             } else if (type.equals("POSTGRES_REAL")) {
                 // get real cardinality through count(*) query, only use for analysis purpose
                 cardinalityEstimator = new PostgresCardinalityCollector();

@@ -196,9 +196,9 @@ def source_config(source: str, dataset: str) -> dict[str, object]:
             # non-empty placeholder keeps PostgreSQL URI parsers happy.
             "password": os.environ.get(f"{prefix}_PASSWORD", "unused"),
             "costParams": cost_params,
-            # DataFusion does not expose meaningful PostgreSQL reltuples/
-            # pg_stats or CTID. Unknown values select Accio's generic paths.
-            "cardEstType": "default",
+            # The source exposes cached row counts and join-key NDVs over
+            # PGWire without emulating PostgreSQL's system catalogs.
+            "cardEstType": "datafusion",
             "partitionType": "default",
             "dialect": "datafusion",
             "disableOps": [],

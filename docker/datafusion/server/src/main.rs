@@ -3,7 +3,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use datafusion::arrow::array::{Array, Int64Array, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::options::CsvReadOptions;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_postgres::auth::AuthManager;
@@ -38,6 +40,9 @@ const ALL_JOB_TABLES: &[&str] = &[
     "role_type",
     "title",
 ];
+
+const TABLE_STATS_TABLE: &str = "accio_table_stats";
+const COLUMN_STATS_TABLE: &str = "accio_column_stats";
 
 fn field(name: &str, data_type: DataType) -> Field {
     Field::new(name, data_type, true)
@@ -271,6 +276,154 @@ fn job_schema(table: &str) -> Result<Schema, Box<dyn Error>> {
     Ok(Schema::new(fields))
 }
 
+fn join_key_columns(dataset: &str, table: &str) -> &'static [&'static str] {
+    if dataset == "job" {
+        match table {
+            "aka_name" => &["person_id"],
+            "aka_title" => &["movie_id", "kind_id", "episode_of_id"],
+            "cast_info" => &["person_id", "movie_id", "person_role_id", "role_id"],
+            "char_name" => &[],
+            "comp_cast_type" => &[],
+            "company_name" => &[],
+            "company_type" => &[],
+            "complete_cast" => &["movie_id", "subject_id", "status_id"],
+            "info_type" => &[],
+            "keyword" => &[],
+            "kind_type" => &[],
+            "link_type" => &[],
+            "movie_companies" => &["movie_id", "company_id", "company_type_id"],
+            "movie_info" | "movie_info_idx" => &["movie_id", "info_type_id"],
+            "movie_keyword" => &["movie_id", "keyword_id"],
+            "movie_link" => &["movie_id", "linked_movie_id", "link_type_id"],
+            "name" => &[],
+            "person_info" => &["person_id", "info_type_id"],
+            "role_type" => &[],
+            "title" => &["kind_id", "episode_of_id"],
+            _ => &[],
+        }
+    } else {
+        match table {
+            "region" => &[],
+            "nation" => &["n_regionkey"],
+            "supplier" => &["s_nationkey"],
+            "customer" => &["c_nationkey"],
+            "part" => &[],
+            "partsupp" => &["ps_partkey", "ps_suppkey"],
+            "orders" => &["o_custkey"],
+            "lineitem" => &["l_orderkey", "l_partkey", "l_suppkey"],
+            _ => &[],
+        }
+    }
+}
+
+fn primary_key_column(dataset: &str, table: &str) -> Option<&'static str> {
+    if dataset == "job" {
+        return Some("id");
+    }
+    match table {
+        "region" => Some("r_regionkey"),
+        "nation" => Some("n_nationkey"),
+        "supplier" => Some("s_suppkey"),
+        "customer" => Some("c_custkey"),
+        "part" => Some("p_partkey"),
+        "orders" => Some("o_orderkey"),
+        _ => None,
+    }
+}
+
+fn count_value(batch: &RecordBatch, column: usize) -> Result<i64, Box<dyn Error>> {
+    let array = batch.column(column);
+    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        return Ok(values.value(0));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
+        return i64::try_from(values.value(0)).map_err(Into::into);
+    }
+    Err(format!(
+        "unexpected aggregate type for column {column}: {}",
+        array.data_type()
+    )
+    .into())
+}
+
+async fn register_statistics(
+    context: &SessionContext,
+    dataset: &str,
+    tables: &[String],
+) -> Result<(), Box<dyn Error>> {
+    let mut table_names = Vec::with_capacity(tables.len());
+    let mut row_counts = Vec::with_capacity(tables.len());
+    let mut column_tables = Vec::new();
+    let mut column_names = Vec::new();
+    let mut distinct_counts = Vec::new();
+
+    for table in tables {
+        let columns = join_key_columns(dataset, table);
+        let mut projections = vec!["COUNT(*) AS row_count".to_owned()];
+        projections.extend(
+            columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| format!("APPROX_DISTINCT(\"{column}\") AS ndv_{index}")),
+        );
+        let sql = format!("SELECT {} FROM \"{table}\"", projections.join(", "));
+        info!("collecting statistics for {table}");
+        let batches = context.sql(&sql).await?.collect().await?;
+        let batch = batches
+            .first()
+            .ok_or_else(|| format!("statistics query returned no rows for {table}"))?;
+        let row_count = count_value(batch, 0)?;
+        table_names.push(table.clone());
+        row_counts.push(row_count);
+
+        let primary_key = primary_key_column(dataset, table);
+        if let Some(column) = primary_key {
+            column_tables.push(table.clone());
+            column_names.push(column.to_owned());
+            distinct_counts.push(row_count);
+        }
+        for (index, column) in columns.iter().enumerate() {
+            let distinct_count = count_value(batch, index + 1)?;
+            column_tables.push(table.clone());
+            column_names.push((*column).to_owned());
+            distinct_counts.push(distinct_count);
+        }
+        info!(
+            "statistics ready for {table}: rows={row_count}, join_columns={}",
+            columns.len() + usize::from(primary_key.is_some())
+        );
+    }
+
+    let table_batch = RecordBatch::try_from_iter(vec![
+        (
+            "table_name",
+            Arc::new(StringArray::from(table_names)) as Arc<dyn Array>,
+        ),
+        (
+            "row_count",
+            Arc::new(Int64Array::from(row_counts)) as Arc<dyn Array>,
+        ),
+    ])?;
+    context.register_batch(TABLE_STATS_TABLE, table_batch)?;
+
+    let column_batch = RecordBatch::try_from_iter(vec![
+        (
+            "table_name",
+            Arc::new(StringArray::from(column_tables)) as Arc<dyn Array>,
+        ),
+        (
+            "column_name",
+            Arc::new(StringArray::from(column_names)) as Arc<dyn Array>,
+        ),
+        (
+            "distinct_count",
+            Arc::new(Int64Array::from(distinct_counts)) as Arc<dyn Array>,
+        ),
+    ])?;
+    context.register_batch(COLUMN_STATS_TABLE, column_batch)?;
+    Ok(())
+}
+
 fn assigned_tables(source_id: &str, dataset: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let prefix = source_id.to_ascii_uppercase();
     let variable = format!("ACCIO_TABLES_{prefix}");
@@ -388,6 +541,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for table in &tables {
         register_table(&context, &dataset, table, &data_dir).await?;
     }
+    register_statistics(&context, &dataset, &tables).await?;
 
     setup_pg_catalog(&context, "datafusion", Arc::new(AuthManager::new()))?;
 
@@ -404,4 +558,72 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_port(5432);
     serve(Arc::new(context), &options).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::Int32Array;
+
+    #[tokio::test]
+    async fn registers_row_counts_and_join_key_distinct_counts() {
+        let context = SessionContext::new();
+        let input = RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                Arc::new(Int32Array::from(vec![1, 2, 3])) as Arc<dyn Array>,
+            ),
+            (
+                "movie_id",
+                Arc::new(Int32Array::from(vec![10, 10, 11])) as Arc<dyn Array>,
+            ),
+            (
+                "linked_movie_id",
+                Arc::new(Int32Array::from(vec![20, 21, 20])) as Arc<dyn Array>,
+            ),
+            (
+                "link_type_id",
+                Arc::new(Int32Array::from(vec![1, 1, 2])) as Arc<dyn Array>,
+            ),
+        ])
+        .unwrap();
+        context.register_batch("movie_link", input).unwrap();
+
+        register_statistics(&context, "job", &["movie_link".to_owned()])
+            .await
+            .unwrap();
+
+        let table_batches = context
+            .sql("SELECT row_count FROM accio_table_stats WHERE table_name = 'movie_link'")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(count_value(&table_batches[0], 0).unwrap(), 3);
+
+        let column_batches = context
+            .sql(
+                "SELECT distinct_count FROM accio_column_stats \
+                 WHERE table_name = 'movie_link' AND column_name = 'movie_id'",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(count_value(&column_batches[0], 0).unwrap(), 2);
+
+        let id_batches = context
+            .sql(
+                "SELECT distinct_count FROM accio_column_stats \
+                 WHERE table_name = 'movie_link' AND column_name = 'id'",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(count_value(&id_batches[0], 0).unwrap(), 3);
+    }
 }
